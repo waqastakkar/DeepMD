@@ -1,0 +1,8 @@
+{
+  "steps": 5000,
+  "bins": 60,
+  "seed": 2025,
+  "mixture_centers": [-1.1, 1.2],
+  "mixture_scales": [0.35, 0.25],
+  "mixture_weights": [0.6, 0.4]
+}
