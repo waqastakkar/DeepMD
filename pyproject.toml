@@ -1,0 +1,20 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+branch = true
+source = ["."]
+
+[tool.coverage.report]
+show_missing = true
