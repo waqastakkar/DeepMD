@@ -24,7 +24,11 @@ sys.modules.setdefault("openmm.app", openmm_app_stub)
 
 validate_stub = types.ModuleType("validate")
 metrics_stub = types.ModuleType("validate.metrics")
-metrics_stub.anharmonicity_gamma = lambda _data: 0.1
+metrics_stub.gaussianity_report = lambda _data: {
+    "skewness": 0.1,
+    "excess_kurtosis": 0.2,
+    "tail_risk": 0.01,
+}
 sys.modules.setdefault("validate", validate_stub)
 sys.modules.setdefault("validate.metrics", metrics_stub)
 
@@ -163,7 +167,9 @@ def test_equil_cycle_policy_integration(tmp_path, monkeypatch):
 
     assert "policy" in called
     assert called["params"] is expected_params
-    assert "kurtosis_proxy" in metrics
+    assert "skewness" in metrics
+    assert "excess_kurtosis" in metrics
+    assert "tail_risk" in metrics
 
     bias_path = tmp_path / "bias_plan_cycle_1.json"
     assert bias_path.exists()
