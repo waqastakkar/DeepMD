@@ -11,9 +11,10 @@ import openmm as mm
 from paddle.config import SimulationConfig, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation, minimize_and_initialize
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
-from paddle.io.report import ensure_dir, write_run_manifest, append_metrics
+from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
 from policy import propose_boost_params
+from validate.metrics import anharmonicity_gamma
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
@@ -74,10 +75,14 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
     n = max(1, steps // interval)
     vmin_d = float("inf"); vmax_d = float("-inf")
     vmin_p = float("inf"); vmax_p = float("-inf")
+    dihedral_samples: list[float] = []
+    total_samples: list[float] = []
     for _ in range(n):
         sim.step(interval)
         Ed = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         Ep = sim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        dihedral_samples.append(Ed)
+        total_samples.append(Ep)
         if Ed < vmin_d: vmin_d = Ed
         if Ed > vmax_d: vmax_d = Ed
         if Ep < vmin_p: vmin_p = Ep
@@ -88,7 +93,7 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
         vmin_d -= pad_d; vmax_d += pad_d
     if vmax_p - vmin_p < 1e-6:
         vmin_p -= pad_p; vmax_p += pad_p
-    return vmin_d, vmax_d, vmin_p, vmax_p
+    return vmin_d, vmax_d, vmin_p, vmax_p, dihedral_samples, total_samples
 
 def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
     return EngineOptions(
@@ -114,10 +119,16 @@ def _run_equil_cycle(
     equil_dir = outdir / "equil"
     ensure_dir(equil_dir)
 
-    VminD, VmaxD, VminP, VmaxP = _estimate_bounds(
+    VminD, VmaxD, VminP, VmaxP, dihedral_samples, total_samples = _estimate_bounds(
         sim, steps=min(10000, cfg.ntebpercyc // 10), interval=max(10, cfg.ebRestartFreq)
     )
     cycle_stats = {"VminD": VminD, "VmaxD": VmaxD, "VminP": VminP, "VmaxP": VmaxP}
+    gaussianity = {
+        "kurtosis_dihedral": anharmonicity_gamma(dihedral_samples),
+        "kurtosis_total": anharmonicity_gamma(total_samples),
+    }
+    gaussianity["kurtosis_proxy"] = 0.5 * (gaussianity["kurtosis_dihedral"] + gaussianity["kurtosis_total"])
+    metrics.update(gaussianity)
     params = propose_boost_params(
         cfg,
         cycle_stats=cycle_stats,
@@ -125,6 +136,30 @@ def _run_equil_cycle(
         metrics=metrics,
         model_summary=model_summary,
     )
+    ref_ed = params.VminD + (params.VmaxD - params.VminD) / max(params.k0D, 1e-12)
+    ref_ep = params.VminP + (params.VmaxP - params.VminP) / max(params.k0P, 1e-12)
+    bias_plan = {
+        "cycle": cyc,
+        "params": {
+            "VminD": params.VminD,
+            "VmaxD": params.VmaxD,
+            "VminP": params.VminP,
+            "VmaxP": params.VmaxP,
+            "k0D": params.k0D,
+            "k0P": params.k0P,
+            "refED_factor": params.refED_factor,
+            "refEP_factor": params.refEP_factor,
+            "refED": ref_ed,
+            "refEP": ref_ep,
+        },
+        "metrics": {
+            "cycle_stats": cycle_stats,
+            **gaussianity,
+        },
+    }
+    if model_summary is not None:
+        bias_plan["model_summary"] = model_summary
+    write_json(bias_plan, outdir / f"bias_plan_cycle_{cyc}.json")
 
     integ = make_dual_equil(dt_ps=0.002, temperature_K=cfg.temperature, params=params)
 
