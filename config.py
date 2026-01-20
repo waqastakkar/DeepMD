@@ -101,6 +101,11 @@ class SimulationConfig:
     k0_min: float = 0.1
     k0_max: float = 0.9
 
+    gaussian_skew_good: float = 0.2
+    gaussian_excess_kurtosis_good: float = 0.2
+    gaussian_excess_kurtosis_high: float = 1.0
+    gaussian_tail_risk_good: float = 0.01
+
     platform: str = "CUDA"
     precision: str = "mixed"
     deterministic_forces: bool = False  # set True if you need bitwise reproducibility
@@ -135,6 +140,11 @@ class SimulationConfig:
         _assert_range("k0_max", self.k0_max, 0.0, 1.0)
         if self.k0_min > self.k0_max:
             raise ValueError("k0_min must be <= k0_max")
+
+        _assert_range("gaussian_skew_good", self.gaussian_skew_good, 0.0, 10.0)
+        _assert_range("gaussian_excess_kurtosis_good", self.gaussian_excess_kurtosis_good, 0.0, 10.0)
+        _assert_range("gaussian_excess_kurtosis_high", self.gaussian_excess_kurtosis_high, 0.0, 10.0)
+        _assert_range("gaussian_tail_risk_good", self.gaussian_tail_risk_good, 0.0, 1.0)
 
         if self.precision not in {"single", "mixed", "double"}:
             raise ValueError("precision must be one of: single|mixed|double")

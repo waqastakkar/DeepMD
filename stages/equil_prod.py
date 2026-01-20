@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Tuple
+import numpy as np
 from openmm import XmlSerializer, unit
 from openmm.app import DCDReporter, StateDataReporter
 import openmm as mm
@@ -14,7 +15,7 @@ from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conven
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
 from policy import propose_boost_params
-from validate.metrics import anharmonicity_gamma
+from validate.metrics import gaussianity_report
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
@@ -123,11 +124,23 @@ def _run_equil_cycle(
         sim, steps=min(10000, cfg.ntebpercyc // 10), interval=max(10, cfg.ebRestartFreq)
     )
     cycle_stats = {"VminD": VminD, "VmaxD": VmaxD, "VminP": VminP, "VmaxP": VmaxP}
+    dihedral_report = gaussianity_report(np.asarray(dihedral_samples, dtype=float))
+    total_report = gaussianity_report(np.asarray(total_samples, dtype=float))
     gaussianity = {
-        "kurtosis_dihedral": anharmonicity_gamma(dihedral_samples),
-        "kurtosis_total": anharmonicity_gamma(total_samples),
+        "skewness_dihedral": dihedral_report["skewness"],
+        "excess_kurtosis_dihedral": dihedral_report["excess_kurtosis"],
+        "tail_risk_dihedral": dihedral_report["tail_risk"],
+        "skewness_total": total_report["skewness"],
+        "excess_kurtosis_total": total_report["excess_kurtosis"],
+        "tail_risk_total": total_report["tail_risk"],
     }
-    gaussianity["kurtosis_proxy"] = 0.5 * (gaussianity["kurtosis_dihedral"] + gaussianity["kurtosis_total"])
+    gaussianity["skewness"] = 0.5 * (gaussianity["skewness_dihedral"] + gaussianity["skewness_total"])
+    gaussianity["excess_kurtosis"] = 0.5 * (
+        gaussianity["excess_kurtosis_dihedral"] + gaussianity["excess_kurtosis_total"]
+    )
+    gaussianity["tail_risk"] = 0.5 * (gaussianity["tail_risk_dihedral"] + gaussianity["tail_risk_total"])
+    gaussianity["skew"] = gaussianity["skewness"]
+    gaussianity["kurtosis"] = gaussianity["excess_kurtosis"]
     metrics.update(gaussianity)
     params = propose_boost_params(
         cfg,

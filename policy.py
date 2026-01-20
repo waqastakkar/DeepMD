@@ -62,15 +62,19 @@ def _adjust_k0(
     base: float,
     metrics: Mapping[str, object],
     model_summary: Optional[Mapping[str, object]],
+    *,
+    kurtosis_high: float,
+    kurtosis_good: float,
+    skew_good: float,
 ) -> float:
     kurtosis = _metric(metrics, "kurtosis", "kurtosis_proxy", "excess_kurtosis")
-    skew = _metric(metrics, "skew", "skew_proxy")
+    skew = _metric(metrics, "skew", "skew_proxy", "skewness")
     k0 = base
-    if kurtosis is not None and abs(kurtosis) >= _KURTOSIS_HIGH:
+    if kurtosis is not None and abs(kurtosis) >= kurtosis_high:
         return k0 * _K0_DOWN_FACTOR
     if kurtosis is None or skew is None:
         return k0
-    if abs(kurtosis) <= _KURTOSIS_GOOD and abs(skew) <= _SKEW_GOOD:
+    if abs(kurtosis) <= kurtosis_good and abs(skew) <= skew_good:
         if _uncertainty_is_low(model_summary):
             return k0 + _K0_UP_STEP
     return k0
@@ -91,6 +95,10 @@ def propose_boost_params(
     if k0_min > k0_max:
         raise ValueError(f"k0_min must be <= k0_max, got {(k0_min, k0_max)}")
     base_k0 = float(getattr(cfg, "k0_initial", 0.5))
+
+    kurtosis_high = float(getattr(cfg, "gaussian_excess_kurtosis_high", _KURTOSIS_HIGH))
+    kurtosis_good = float(getattr(cfg, "gaussian_excess_kurtosis_good", _KURTOSIS_GOOD))
+    skew_good = float(getattr(cfg, "gaussian_skew_good", _SKEW_GOOD))
 
     k0D_base = base_k0
     k0P_base = base_k0
@@ -117,8 +125,22 @@ def propose_boost_params(
     vmin_d, vmax_d = _sanitize_bounds(vmin_d, vmax_d)
     vmin_p, vmax_p = _sanitize_bounds(vmin_p, vmax_p)
 
-    k0D = _adjust_k0(k0D_base, metrics, model_summary)
-    k0P = _adjust_k0(k0P_base, metrics, model_summary)
+    k0D = _adjust_k0(
+        k0D_base,
+        metrics,
+        model_summary,
+        kurtosis_high=kurtosis_high,
+        kurtosis_good=kurtosis_good,
+        skew_good=skew_good,
+    )
+    k0P = _adjust_k0(
+        k0P_base,
+        metrics,
+        model_summary,
+        kurtosis_high=kurtosis_high,
+        kurtosis_good=kurtosis_good,
+        skew_good=skew_good,
+    )
 
     k0D = _clamp(k0D, k0_min, k0_max)
     k0P = _clamp(k0P, k0_min, k0_max)
