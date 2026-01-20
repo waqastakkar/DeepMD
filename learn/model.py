@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -167,6 +167,7 @@ def train_ensemble(npz: str | Path, splits: str | Path, out_dir: str | Path, cfg
     y_te = y[a:b]
     metrics = compute_metrics(y_te, mu_te, sig_te)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    export_model_summary(out, metrics)
 
     meta = {"train_config": asdict(cfg), **results, "metrics": metrics}
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -222,7 +223,45 @@ def compute_metrics(y_true: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> Di
     mse = float(np.mean(np.square(resid)))
     mae = float(np.mean(np.abs(resid)))
     within1 = float(np.mean(np.abs(resid) <= sigma))
-    return {"mse": mse, "mae": mae, "within_1sigma": within1}
+    mean_sigma = float(np.mean(sigma))
+    return {
+        "mse": mse,
+        "mae": mae,
+        "within_1sigma": within1,
+        "uncertainty": mean_sigma,
+    }
+
+
+def export_model_summary(outdir: str | Path, metrics_dict: Mapping[str, object]) -> Dict[str, object]:
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    summary: Dict[str, object] = {}
+    uncertainty = metrics_dict.get("uncertainty")
+    if uncertainty is None:
+        uncertainty = metrics_dict.get("mean_sigma")
+    if uncertainty is not None:
+        summary["uncertainty"] = float(uncertainty)
+
+    calibration = metrics_dict.get("calibration_score")
+    if calibration is None:
+        calibration = metrics_dict.get("within_1sigma")
+    if calibration is not None:
+        summary["calibration_score"] = float(calibration)
+
+    fit_stats: Dict[str, float] = {}
+    for key in ("mse", "mae", "rmse"):
+        if key in metrics_dict and metrics_dict[key] is not None:
+            fit_stats[key] = float(metrics_dict[key])
+    if fit_stats:
+        summary["fit_stats"] = fit_stats
+
+    recommended_step = metrics_dict.get("recommended_step_size")
+    if recommended_step is not None:
+        summary["recommended_step_size"] = float(recommended_step)
+
+    (out / "model_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
 
 
 # ---- CLI (unchanged interface) ------------------------------------------------

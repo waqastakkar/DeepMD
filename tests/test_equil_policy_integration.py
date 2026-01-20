@@ -77,6 +77,7 @@ sys.modules.setdefault("paddle.io.restart", restart_module)
 
 from config import SimulationConfig  # noqa: E402
 from core.params import BoostParams  # noqa: E402
+from restart import RestartRecord  # noqa: E402
 from stages import equil_prod  # noqa: E402
 
 
@@ -176,3 +177,44 @@ def test_equil_cycle_policy_integration(tmp_path, monkeypatch):
     data = json.loads(bias_path.read_text(encoding="utf-8"))
     assert data["params"]["k0D"] == expected_params.k0D
     assert data["params"]["k0P"] == expected_params.k0P
+
+
+def test_run_equil_and_prod_loads_model_summary(tmp_path, monkeypatch):
+    cfg = SimulationConfig()
+    cfg.outdir = str(tmp_path)
+    cfg.ncycebstart = 0
+    cfg.ncycebend = 1
+    cfg.ncycprodstart = 0
+    cfg.ncycprodend = 0
+
+    summary = {"uncertainty": 0.12, "calibration_score": 0.9}
+    (tmp_path / "model_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+    captured = {}
+
+    def fake_run_equil_cycle(cfg_arg, cyc, sim, outdir, last_restart, metrics, model_summary=None):
+        captured["model_summary"] = model_summary
+        return RestartRecord(
+            steps=1,
+            VminD_kJ=1.0,
+            VmaxD_kJ=2.0,
+            DihedralRef_kJ=1.5,
+            DihedralBoost_kJ=0.0,
+            k0D=0.4,
+            VminP_kJ=3.0,
+            VmaxP_kJ=4.0,
+            TotalRef_kJ=3.5,
+            TotalBoost_kJ=0.0,
+            k0P=0.4,
+        )
+
+    monkeypatch.setattr(equil_prod, "_assign_force_groups", lambda sim: None)
+    monkeypatch.setattr(equil_prod, "_load_cmd_checkpoint_if_any", lambda sim, outdir: True)
+    monkeypatch.setattr(equil_prod, "create_simulation", lambda *args, **kwargs: DummySim())
+    monkeypatch.setattr(equil_prod, "minimize_and_initialize", lambda *args, **kwargs: None)
+    monkeypatch.setattr(equil_prod, "_run_equil_cycle", fake_run_equil_cycle)
+    monkeypatch.setattr(equil_prod, "_run_prod_cycle", lambda *args, **kwargs: None)
+
+    equil_prod.run_equil_and_prod(cfg)
+
+    assert captured["model_summary"] == summary
