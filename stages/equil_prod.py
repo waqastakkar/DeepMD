@@ -3,6 +3,7 @@ stages/equil_prod.py — Equilibration (dual-boost) + Production
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional, Tuple
 import numpy as np
@@ -54,6 +55,14 @@ def _assign_force_groups(sim) -> None:
     for force in sim.system.getForces():
         if force.__class__.__name__ == "PeriodicTorsionForce":
             force.setForceGroup(2)
+
+
+def _load_model_summary(outdir: Path) -> Optional[dict[str, object]]:
+    summary_path = outdir / "model_summary.json"
+    if not summary_path.exists():
+        return None
+    with summary_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 def _load_cmd_checkpoint_if_any(sim, outdir: Path) -> bool:
     rst = outdir / "cmd.rst"
@@ -287,7 +296,7 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
 
     rec: Optional[RestartRecord] = None
     metrics: dict[str, object] = {}
-    model_summary: Optional[dict[str, object]] = None
+    model_summary = _load_model_summary(outdir)
     for cyc in range(int(cfg.ncycebstart), int(cfg.ncycebend)):
         rec = _run_equil_cycle(cfg, cyc, sim, outdir, rec, metrics, model_summary=model_summary)
 
