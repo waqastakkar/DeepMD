@@ -25,9 +25,16 @@ class EngineOptions:
 
 
 def get_platform(name: str = "CUDA", precision: str = "mixed", deterministic_forces: bool = False) -> Tuple[Platform, Dict[str, str]]:
-    plat = Platform.getPlatformByName(name)
+    available = {
+        Platform.getPlatform(i).getName(): Platform.getPlatform(i)
+        for i in range(Platform.getNumPlatforms())
+    }
+    plat = available.get(name)
+    if plat is None:
+        plat = available.get("CPU", Platform.getPlatformByName("CPU"))
     props: Dict[str, str] = {}
-    if name in {"CUDA", "OpenCL"}:
+    plat_name = plat.getName()
+    if plat_name in {"CUDA", "OpenCL"}:
         props["Precision"] = precision
         if deterministic_forces:
             props["DeterministicForces"] = "true"
