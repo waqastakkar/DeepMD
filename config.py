@@ -97,6 +97,9 @@ class SimulationConfig:
 
     refEP_factor: float = 0.05
     refED_factor: float = 0.05
+    k0_initial: float = 0.5
+    k0_min: float = 0.1
+    k0_max: float = 0.9
 
     platform: str = "CUDA"
     precision: str = "mixed"
@@ -127,6 +130,11 @@ class SimulationConfig:
 
         _assert_range("refEP_factor", self.refEP_factor, 0.0, 1.0)
         _assert_range("refED_factor", self.refED_factor, 0.0, 1.0)
+        _assert_range("k0_initial", self.k0_initial, 0.0, 1.0)
+        _assert_range("k0_min", self.k0_min, 0.0, 1.0)
+        _assert_range("k0_max", self.k0_max, 0.0, 1.0)
+        if self.k0_min > self.k0_max:
+            raise ValueError("k0_min must be <= k0_max")
 
         if self.precision not in {"single", "mixed", "double"}:
             raise ValueError("precision must be one of: single|mixed|double")

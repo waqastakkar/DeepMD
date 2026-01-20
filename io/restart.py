@@ -180,7 +180,7 @@ def backup(path: str | Path, backup_dir: str | Path) -> Path:
     return dst
 
 def record_to_boost_params(rec: RestartRecord):
-    from dbmdx.core.integrators import BoostParams
+    from core.params import BoostParams
     return BoostParams(
         VminD=rec.VminD_kJ,
         VmaxD=rec.VmaxD_kJ,

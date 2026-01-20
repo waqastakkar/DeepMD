@@ -10,9 +10,10 @@ from openmm.app import DCDReporter, StateDataReporter
 import openmm as mm
 from paddle.config import SimulationConfig, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation, minimize_and_initialize
-from paddle.core.integrators import BoostParams, make_dual_equil, make_dual_prod, make_conventional
+from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
+from policy import propose_boost_params
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
@@ -101,16 +102,28 @@ def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
         barostat_interval=25,
     )
 
-def _run_equil_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, k0D: float = 0.5, k0P: float = 0.5) -> RestartRecord:
+def _run_equil_cycle(
+    cfg: SimulationConfig,
+    cyc: int,
+    sim,
+    outdir: Path,
+    last_restart: Optional[RestartRecord],
+    metrics: dict[str, object],
+    model_summary: Optional[dict[str, object]] = None,
+) -> RestartRecord:
     equil_dir = outdir / "equil"
     ensure_dir(equil_dir)
 
     VminD, VmaxD, VminP, VmaxP = _estimate_bounds(
         sim, steps=min(10000, cfg.ntebpercyc // 10), interval=max(10, cfg.ebRestartFreq)
     )
-    params = BoostParams(
-        VminD=VminD, VmaxD=VmaxD, VminP=VminP, VmaxP=VmaxP,
-        k0D=k0D, k0P=k0P, refED_factor=cfg.refED_factor, refEP_factor=cfg.refEP_factor
+    cycle_stats = {"VminD": VminD, "VmaxD": VmaxD, "VminP": VminP, "VmaxP": VmaxP}
+    params = propose_boost_params(
+        cfg,
+        cycle_stats=cycle_stats,
+        last_restart=last_restart,
+        metrics=metrics,
+        model_summary=model_summary,
     )
 
     integ = make_dual_equil(dt_ps=0.002, temperature_K=cfg.temperature, params=params)
@@ -225,8 +238,10 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     })
 
     rec: Optional[RestartRecord] = None
+    metrics: dict[str, object] = {}
+    model_summary: Optional[dict[str, object]] = None
     for cyc in range(int(cfg.ncycebstart), int(cfg.ncycebend)):
-        rec = _run_equil_cycle(cfg, cyc, sim, outdir, k0D=0.5, k0P=0.5)
+        rec = _run_equil_cycle(cfg, cyc, sim, outdir, rec, metrics, model_summary=model_summary)
 
     if rec is None:
         restart_path = outdir / "gamd-restart.dat"
