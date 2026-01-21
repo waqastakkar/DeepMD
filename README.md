@@ -9,19 +9,22 @@ functionality for reviewers.
 
 ## Quickstart
 
+<!-- BEGIN GENERATED QUICKSTART -->
 Install the package with your preferred environment manager. Ensure that Python can import
 the package and that all simulation dependencies are available.
 
-Minimal pipeline invocation (uses the CLI entry point):
+CLI entry point: run via `python cli.py`.
+
+Minimal pipeline invocation (full workflow):
 
 ```bash
-python -m paddle.cli pipeline --config config.yaml --out outdir
+python cli.py pipeline --config config.yaml --out outdir
 ```
 
 Generate example configuration YAMLs (writes explicit/implicit configs):
 
 ```bash
-python -m paddle.cli make_configs --out configs
+python cli.py make_configs --out configs
 ```
 
 Example config files produced:
@@ -49,33 +52,34 @@ and run lengths as needed before invoking the pipeline.
 Run just the CMD stage:
 
 ```bash
-python -m paddle.cli cmd --config config.yml --out out_cmd
+python cli.py cmd --config config.yml --out out_cmd
 ```
 
 Run equilibration-prep and then build a training dataset:
 
 ```bash
-python -m paddle.cli prep --config config.yml --out out_prep
-python -m paddle.cli data --prep out_prep/prep --out out_data
+python cli.py prep --config config.yml --out out_prep
+python cli.py data --prep out_prep/prep --out out_data
 ```
 
 Train an ensemble model from a prepared dataset:
 
 ```bash
-python -m paddle.cli train --data out_data/windows.npz --splits out_data/splits.json --out out_models
+python cli.py train --data out_data/windows.npz --splits out_data/splits.json --out out_models
 ```
 
 Run equilibration + production only:
 
 ```bash
-python -m paddle.cli equil_prod --config config.yml --out out_prod
+python cli.py equil_prod --config config.yml --out out_prod
 ```
 
 Generate alanine dipeptide benchmarks:
 
 ```bash
-python -m paddle.cli bench_alanine --out benchmarks/alanine
+python cli.py bench_alanine --out benchmarks/alanine
 ```
+<!-- END GENERATED QUICKSTART -->
 
 ### Ablation comparison (not part of the pipeline)
 
