@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 import numpy as np
 from openmm import XmlSerializer, unit
 from openmm.app import DCDReporter, StateDataReporter
@@ -303,7 +303,42 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
         vmin_p -= pad_p; vmax_p += pad_p
     return vmin_d, vmax_d, vmin_p, vmax_p, dihedral_samples, total_samples, temperature_samples
 
-def _load_latent_pca_if_any(outdir: Path) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+def _resolve_kept_feature_indices(payload: dict[str, object]) -> Optional[list[int]]:
+    kept = payload.get("kept_feature_indices")
+    if kept is not None:
+        return [int(i) for i in kept]
+    original_dim = payload.get("original_dim")
+    if original_dim is None:
+        return None
+    dropped = payload.get("dropped_constant_features", [])
+    dropped_set = {int(i) for i in dropped}
+    return [i for i in range(int(original_dim)) if i not in dropped_set]
+
+
+def _validate_pca_projection_inputs(
+    X: np.ndarray,
+    mean: np.ndarray,
+    components: np.ndarray,
+    kept_feature_indices: Optional[Sequence[int]],
+    original_dim: Optional[int],
+) -> None:
+    if X.ndim != 2:
+        raise ValueError(f"PCA projection expects 2D X, got shape {X.shape}.")
+    if original_dim is not None and X.shape[1] != original_dim:
+        raise ValueError(
+            "PCA projection input dimension mismatch before dropping: "
+            f"X.shape={X.shape}, original_dim={original_dim}."
+        )
+    reduced_dim = len(kept_feature_indices) if kept_feature_indices is not None else X.shape[1]
+    if reduced_dim != mean.shape[0] or reduced_dim != components.shape[1]:
+        raise ValueError(
+            "PCA projection dimension mismatch after dropping: "
+            f"X.shape={X.shape}, mean.shape={mean.shape}, components.shape={components.shape}, "
+            f"kept_feature_indices={list(kept_feature_indices) if kept_feature_indices is not None else None}."
+        )
+
+
+def _load_latent_pca_if_any(outdir: Path) -> Optional[Tuple[np.ndarray, np.ndarray, dict[str, object]]]:
     candidates = [
         outdir / "models" / "run1" / "latent_pca.json",
         outdir / "latent_pca.json",
@@ -342,7 +377,7 @@ def _run_equil_cycle(
     k0D_hist: list[float],
     k0P_hist: list[float],
     explore_hist: list[float],
-    latent_pca: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    latent_pca: Optional[Tuple[np.ndarray, np.ndarray, dict[str, object]]] = None,
     model_summary: Optional[dict[str, object]] = None,
 ) -> tuple[RestartRecord, dict[str, object]]:
     equil_dir = outdir / "equil"
@@ -385,7 +420,9 @@ def _run_equil_cycle(
     latent_metrics: Optional[dict[str, float]] = None
     latent_explore_std: Optional[float] = None
     if latent_pca is not None:
-        mean, components = latent_pca
+        mean, components, payload = latent_pca
+        kept_feature_indices = _resolve_kept_feature_indices(payload)
+        original_dim = payload.get("original_dim")
         min_len = min(len(total_samples), len(dihedral_samples), len(temperature_samples))
         if min_len > 0:
             X_cycle = np.column_stack([
@@ -393,7 +430,15 @@ def _run_equil_cycle(
                 np.asarray(dihedral_samples[:min_len], dtype=float),
                 np.asarray(temperature_samples[:min_len], dtype=float),
             ])
-            Z = project_pca(X_cycle, mean, components)
+            if bool(getattr(cfg, "safe_mode", False) or getattr(cfg, "validate_config", False)):
+                _validate_pca_projection_inputs(
+                    X_cycle,
+                    mean,
+                    components,
+                    kept_feature_indices,
+                    int(original_dim) if original_dim is not None else None,
+                )
+            Z = project_pca(X_cycle, mean, components, kept_feature_indices)
             reports = [gaussianity_report(Z[:, i]) for i in range(Z.shape[1])]
             agg = aggregate_gaussianity(reports)
             latent_conf = gaussian_confidence(

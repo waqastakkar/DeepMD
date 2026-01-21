@@ -239,6 +239,7 @@ def train_ensemble(npz: str | Path, splits: str | Path, out_dir: str | Path, cfg
         const_mask = feat_std < 1e-12
         dropped = np.where(const_mask)[0].tolist()
         original_dim = int(X_train.shape[1])
+        kept_feature_indices = [i for i in range(original_dim) if i not in set(dropped)]
         if dropped:
             print(f"Warning: dropping {len(dropped)} constant PCA features: {dropped}")
             X_train = X_train[:, ~const_mask]
@@ -267,6 +268,7 @@ def train_ensemble(npz: str | Path, splits: str | Path, out_dir: str | Path, cfg
             "dropped_constant_features": dropped,
             "original_dim": original_dim,
             "effective_dim": effective_dim,
+            "kept_feature_indices": kept_feature_indices,
         }
         (out / "latent_pca.json").write_text(json.dumps(pca_payload, indent=2), encoding="utf-8")
         latent_model_summary = {"type": "pca", "k": k_latent, "path": "latent_pca.json"}
