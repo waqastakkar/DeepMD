@@ -88,3 +88,35 @@ def detect_change_point(
         "window": window,
         "z_threshold": z_threshold,
     }
+
+def exploration_proxy(series: np.ndarray) -> dict[str, float]:
+    """
+    Compute simple exploration proxies from a 1D series:
+      - mean_abs_diff = mean(|x[t]-x[t-1]|)
+      - std = std(x)
+    Return dict with those values.
+    """
+    x = np.asarray(series, dtype=float).ravel()
+    if x.size == 0:
+        return {"mean_abs_diff": 0.0, "std": 0.0}
+    if x.size < 2:
+        return {"mean_abs_diff": 0.0, "std": float(np.std(x))}
+    mean_abs_diff = float(np.mean(np.abs(np.diff(x))))
+    return {"mean_abs_diff": mean_abs_diff, "std": float(np.std(x))}
+
+def exploration_score(val: float, v_good: float, v_high: float) -> float:
+    """
+    Map exploration proxy into [0,1]:
+    - Below v_good -> low exploration -> score near 0
+    - Above v_high -> sufficient exploration -> score near 1
+    - Linear between.
+    """
+    v_good = float(v_good)
+    v_high = float(v_high)
+    if v_high <= v_good:
+        return 1.0 if val >= v_high else 0.0
+    if val <= v_good:
+        return 0.0
+    if val >= v_high:
+        return 1.0
+    return float((val - v_good) / (v_high - v_good))

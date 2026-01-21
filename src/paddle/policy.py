@@ -154,6 +154,45 @@ def uncertainty_scale(cfg, model_summary: Optional[Mapping[str, object]]) -> flo
     return _clamp(scale, 0.0, 1.0)
 
 
+def multi_objective_alpha(
+    cfg,
+    metrics: Mapping[str, object],
+    model_summary: Optional[Mapping[str, object]],
+) -> float:
+    """
+    Compute update magnitude alpha in [0,1] based on multiple objectives:
+      - gaussian confidence (or conf_ewma if available)
+      - exploration score
+      - uncertainty scaling
+      - change-point penalty
+    Deterministic weighted combination.
+    """
+    w_conf = float(getattr(cfg, "multi_objective_w_conf", 0.55))
+    w_explore = float(getattr(cfg, "multi_objective_w_explore", 0.35))
+    w_uncert = float(getattr(cfg, "multi_objective_w_uncert", 0.10))
+    cp_alpha_multiplier = float(getattr(cfg, "cp_alpha_multiplier", 0.0))
+
+    conf = float(metrics.get(
+        "conf_ewma",
+        metrics.get("gaussian_confidence", gaussian_confidence(cfg, metrics)),
+    ))
+    explore = float(metrics.get("explore_score", 0.0))
+    uncert_scale = float(uncertainty_scale(cfg, model_summary))
+
+    alpha_raw = w_conf * conf + w_explore * explore + w_uncert * uncert_scale
+    if bool(metrics.get("change_point", False)):
+        alpha_raw *= cp_alpha_multiplier
+    if bool(metrics.get("controller_frozen", False)):
+        alpha_raw = 0.0
+
+    alpha = _clamp(alpha_raw, 0.0, 1.0)
+    damp_min = float(getattr(cfg, "policy_damp_min", 0.0))
+    damp_max = float(getattr(cfg, "policy_damp_max", 1.0))
+    if alpha > 0.0:
+        alpha = max(damp_min, min(damp_max, alpha))
+    return _clamp(alpha, 0.0, 1.0)
+
+
 def _adjust_k0(
     base: float,
     metrics: Mapping[str, object],
@@ -253,10 +292,7 @@ def propose_boost_params(
             k0P = prev_k0P
         else:
             # Uncertainty-aware damping between previous and proposed values.
-            conf = gaussian_confidence(cfg, metrics)
-            alpha = _clamp(conf, float(cfg.policy_damp_min), float(cfg.policy_damp_max))
-            alpha *= uncertainty_scale(cfg, model_summary)
-            alpha = _clamp(alpha, 0.0, 1.0)
+            alpha = multi_objective_alpha(cfg, metrics, model_summary)
             k0D = prev_k0D + alpha * (k0D_prop - prev_k0D)
             k0P = prev_k0P + alpha * (k0P_prop - prev_k0P)
 

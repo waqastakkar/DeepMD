@@ -19,10 +19,17 @@ from paddle.learn.data import load_latent_pca, project_pca
 from paddle.policy import (
     gaussian_confidence,
     freeze_bias_update,
+    multi_objective_alpha,
     propose_boost_params,
     uncertainty_scale,
 )
-from paddle.validate.metrics import aggregate_gaussianity, detect_change_point, gaussianity_report
+from paddle.validate.metrics import (
+    aggregate_gaussianity,
+    detect_change_point,
+    exploration_proxy,
+    exploration_score,
+    gaussianity_report,
+)
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
@@ -257,7 +264,12 @@ def _run_equil_cycle(
     gaussianity["kurtosis"] = gaussianity["excess_kurtosis"]
     metrics.update(gaussianity)
 
+    exp = exploration_proxy(np.asarray(total_samples, dtype=float))
+    metrics["explore_mean_abs_diff"] = float(exp["mean_abs_diff"])
+    metrics["explore_std"] = float(exp["std"])
+
     latent_metrics: Optional[dict[str, float]] = None
+    latent_explore_std: Optional[float] = None
     if latent_pca is not None:
         mean, components = latent_pca
         min_len = min(len(total_samples), len(dihedral_samples), len(temperature_samples))
@@ -278,6 +290,8 @@ def _run_equil_cycle(
                     "tail_risk": agg["tail_risk"],
                 },
             )
+            if Z.shape[0] > 0 and Z.shape[1] > 0:
+                latent_explore_std = float(np.std(Z[:, 0]))
             latent_metrics = {
                 "latent_skewness": float(agg["skewness"]),
                 "latent_excess_kurtosis": float(agg["excess_kurtosis"]),
@@ -285,6 +299,15 @@ def _run_equil_cycle(
                 "latent_gaussian_confidence": float(latent_conf),
             }
             metrics.update(latent_metrics)
+    if latent_explore_std is not None:
+        metrics["latent_explore_std"] = float(latent_explore_std)
+    explore_std_good = float(getattr(cfg, "explore_std_good", 0.0))
+    explore_std_high = float(getattr(cfg, "explore_std_high", 1.0))
+    explore_score = exploration_score(metrics["explore_std"], explore_std_good, explore_std_high)
+    if latent_explore_std is not None:
+        latent_explore_score = exploration_score(latent_explore_std, explore_std_good, explore_std_high)
+        explore_score = max(explore_score, latent_explore_score)
+    metrics["explore_score"] = float(explore_score)
     history_etot_mean.append(etot_mean)
     cp = detect_change_point(
         np.array(history_etot_mean, dtype=float),
@@ -293,16 +316,25 @@ def _run_equil_cycle(
     )
     metrics["change_point"] = bool(cp["change_point"])
     metrics["change_point_z"] = float(cp["z_score"])
+    metrics["gaussian_confidence"] = float(gaussian_confidence(cfg, metrics))
+    metrics["controller_frozen"] = bool(freeze_bias_update(cfg, metrics))
     controller = {
-        "gaussian_confidence": float(gaussian_confidence(cfg, metrics)),
-        "freeze_bias_update": bool(freeze_bias_update(cfg, metrics)),
+        "gaussian_confidence": float(metrics["gaussian_confidence"]),
+        "freeze_bias_update": bool(metrics["controller_frozen"]),
         "uncertainty_scale": float(uncertainty_scale(cfg, model_summary)),
         "controller_enabled": bool(getattr(cfg, "controller_enabled", True)),
         "change_point": bool(cp["change_point"]),
         "change_point_z": float(cp["z_score"]),
         "change_point_window": int(cp["window"]),
         "change_point_z_threshold": float(cp["z_threshold"]),
+        "explore_mean_abs_diff": float(metrics["explore_mean_abs_diff"]),
+        "explore_std": float(metrics["explore_std"]),
+        "explore_score": float(metrics["explore_score"]),
     }
+    if "conf_ewma" in metrics:
+        controller["conf_ewma"] = float(metrics["conf_ewma"])
+    if latent_explore_std is not None:
+        controller["latent_explore_std"] = float(latent_explore_std)
     params = propose_boost_params(
         cfg,
         cycle_stats=cycle_stats,
@@ -310,6 +342,7 @@ def _run_equil_cycle(
         metrics=metrics,
         model_summary=model_summary,
     )
+    controller["multi_objective_alpha"] = float(multi_objective_alpha(cfg, metrics, model_summary))
     if bool(getattr(cfg, "safe_mode", False)) and cyc == int(cfg.ncycebstart):
         params.k0D = 0.0
         params.k0P = 0.0
