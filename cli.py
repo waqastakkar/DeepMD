@@ -113,6 +113,47 @@ def cmd_bench_alanine(ns):
     for label, path in locations.items():
         print(f"{label}: {path}")
 
+def cmd_make_configs(ns):
+    out_dir = Path(ns.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    explicit_cfg = SimulationConfig(
+        parmFile="topology/protein_solvated.parm7",
+        crdFile="topology/protein_solvated.rst7",
+        simType="explicit",
+        nbCutoff=10.0,
+        temperature=300.0,
+        ntcmd=2_500_000,
+        cmdRestartFreq=1000,
+        platform="CUDA",
+        precision="mixed",
+        cuda_device_index=0,
+        cuda_precision="mixed",
+        require_gpu=True,
+        outdir="out_cmd_explicit_5ns",
+    )
+    implicit_cfg = SimulationConfig(
+        parmFile="topology/protein_solvated.parm7",
+        crdFile="topology/protein_solvated.rst7",
+        simType="protein.implicit",
+        temperature=300.0,
+        ntcmd=2_500_000,
+        cmdRestartFreq=1000,
+        platform="CUDA",
+        precision="mixed",
+        cuda_device_index=0,
+        cuda_precision="mixed",
+        require_gpu=True,
+        outdir="out_cmd_implicit_5ns",
+    )
+
+    explicit_path = out_dir / "config-explicit-5ns.yaml"
+    implicit_path = out_dir / "config-implicit-5ns.yaml"
+    explicit_path.write_text(explicit_cfg.to_yaml(), encoding="utf-8")
+    implicit_path.write_text(implicit_cfg.to_yaml(), encoding="utf-8")
+    print(f"Wrote: {explicit_path}")
+    print(f"Wrote: {implicit_path}")
+
 def build_parser():
     ap = argparse.ArgumentParser(description="paddle CLI")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -147,6 +188,9 @@ def build_parser():
     p = sub.add_parser("bench_alanine", help="Generate alanine dipeptide benchmarks with tleap")
     p.add_argument("--out", default="benchmarks/alanine")
     p.set_defaults(func=cmd_bench_alanine)
+    p = sub.add_parser("make_configs", help="Generate example YAML configs for explicit/implicit CMD runs")
+    p.add_argument("--out", default="configs")
+    p.set_defaults(func=cmd_make_configs)
     return ap
 
 def main(argv=None) -> int:
