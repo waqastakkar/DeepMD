@@ -10,3 +10,4 @@ report_interval: 10000
 output_dir: benchmarks/alanine_mdtest/out
 write_trajectory: false
 trajectory_interval: 10000
+solvent: explicit

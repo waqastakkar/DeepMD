@@ -83,13 +83,14 @@ def run_alanine_mdtest(cfg_path: Path) -> Path:
 
     write_trajectory = bool(cfg.get("write_trajectory", False))
     trajectory_interval = int(cfg.get("trajectory_interval", report_interval))
+    solvent = str(cfg.get("solvent", "explicit"))
 
     from openmm import LangevinMiddleIntegrator, XmlSerializer, unit
     from openmm.app import DCDReporter, Simulation, StateDataReporter
 
     platform, properties = _select_platform(platform_name, require_gpu, device_index, precision)
 
-    topology, system, positions = build_alanine_ace_ala_nme_system()
+    topology, system, positions = build_alanine_ace_ala_nme_system(solvent=solvent)
 
     integrator = LangevinMiddleIntegrator(
         temperature * unit.kelvin,
@@ -151,6 +152,7 @@ def run_alanine_mdtest(cfg_path: Path) -> Path:
         "temperature": temperature,
         "dt_fs": dt_fs,
         "friction_per_ps": friction,
+        "solvent": solvent,
     }
     (outdir / "metadata.json").write_text(
         json.dumps(metadata, indent=2),

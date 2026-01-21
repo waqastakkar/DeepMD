@@ -60,8 +60,9 @@ python benchmarks/alanine/run_benchmark.py \
 ## OpenMM CUDA alanine dipeptide MD test
 
 The repository includes an opt-in, real OpenMM CUDA integration test that runs
-alanine dipeptide (ACE–ALA–NME) in implicit solvent. The default config runs the
-full 5 ns benchmark.
+alanine dipeptide (ACE–ALA–NME) in explicit solvent. The default config runs the
+full 5 ns benchmark, and you can switch to implicit solvent via the `solvent`
+key in the YAML config when using a compatible force field XML.
 
 Run the full benchmark (5 ns):
 
