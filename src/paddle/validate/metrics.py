@@ -31,6 +31,21 @@ def gaussianity_report(data: np.ndarray) -> dict[str, float]:
         "tail_risk": float(tail_risk),
     }
 
+def aggregate_gaussianity(reports: list[dict[str, float]]) -> dict[str, float]:
+    """
+    Combine per-dimension gaussianity reports conservatively.
+    """
+    if not reports:
+        return {"skewness": 0.0, "excess_kurtosis": 0.0, "tail_risk": 0.0}
+    skewness = max(abs(r.get("skewness", 0.0)) for r in reports)
+    excess_kurtosis = max(abs(r.get("excess_kurtosis", 0.0)) for r in reports)
+    tail_risk = max(r.get("tail_risk", 0.0) for r in reports)
+    return {
+        "skewness": float(skewness),
+        "excess_kurtosis": float(excess_kurtosis),
+        "tail_risk": float(tail_risk),
+    }
+
 def write_report_json(path: str | Path, **metrics) -> Path:
     p = Path(path); p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
