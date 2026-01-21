@@ -15,7 +15,12 @@ from paddle.core.engine import EngineOptions, create_simulation
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
-from paddle.policy import propose_boost_params
+from paddle.policy import (
+    gaussian_confidence,
+    freeze_bias_update,
+    propose_boost_params,
+    uncertainty_scale,
+)
 from paddle.validate.metrics import gaussianity_report
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
@@ -222,6 +227,11 @@ def _run_equil_cycle(
     gaussianity["skew"] = gaussianity["skewness"]
     gaussianity["kurtosis"] = gaussianity["excess_kurtosis"]
     metrics.update(gaussianity)
+    controller = {
+        "gaussian_confidence": float(gaussian_confidence(cfg, metrics)),
+        "freeze_bias_update": bool(freeze_bias_update(cfg, metrics)),
+        "uncertainty_scale": float(uncertainty_scale(cfg, model_summary)),
+    }
     params = propose_boost_params(
         cfg,
         cycle_stats=cycle_stats,
@@ -252,6 +262,7 @@ def _run_equil_cycle(
             "cycle_stats": cycle_stats,
             **gaussianity,
         },
+        "controller": controller,
     }
     if model_summary is not None:
         bias_plan["model_summary"] = model_summary
