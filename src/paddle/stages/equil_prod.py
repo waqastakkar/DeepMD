@@ -128,6 +128,67 @@ def _resolve_dt_ps(cfg: SimulationConfig, default: float = 0.002) -> float:
         return default
     return float(dt)
 
+def _adaptive_stop_status(
+    cfg: SimulationConfig,
+    cyc: int,
+    conf_hist: list[float],
+    frozen_hist: list[bool],
+    k0D_hist: list[float],
+    k0P_hist: list[float],
+    explore_hist: list[float],
+) -> dict[str, object]:
+    enabled = bool(getattr(cfg, "adaptive_stop_enabled", False))
+    N = int(getattr(cfg, "adaptive_stop_cycles", 3))
+    conf_threshold = float(getattr(cfg, "adaptive_stop_conf", 0.85))
+    k0_tol = float(getattr(cfg, "adaptive_stop_k0_tol", 0.02))
+    explore_tol = float(getattr(cfg, "adaptive_stop_explore_tol", 0.03))
+    min_cycles = int(getattr(cfg, "adaptive_stop_min_cycles", 5))
+    ready = enabled and (cyc + 1 >= min_cycles) and N > 0 and len(conf_hist) >= N
+    triggered = False
+    conf_tail: list[float] = []
+    frozen_tail: list[bool] = []
+    k0D_tail: list[float] = []
+    k0P_tail: list[float] = []
+    explore_tail: list[float] = []
+    k0_delta_max = 0.0
+    explore_delta_max = 0.0
+    if ready:
+        conf_tail = conf_hist[-N:]
+        frozen_tail = frozen_hist[-N:]
+        k0D_tail = k0D_hist[-N:]
+        k0P_tail = k0P_hist[-N:]
+        explore_tail = explore_hist[-N:]
+        conf_ok = all(conf >= conf_threshold for conf in conf_tail)
+        frozen_ok = all(not frozen for frozen in frozen_tail)
+        k0_delta_max = max(
+            [max(abs(k0D_tail[i] - k0D_tail[i - 1]), abs(k0P_tail[i] - k0P_tail[i - 1])) for i in range(1, N)]
+            or [0.0]
+        )
+        explore_delta_max = max(
+            [abs(explore_tail[i] - explore_tail[i - 1]) for i in range(1, N)]
+            or [0.0]
+        )
+        k0_ok = k0_delta_max <= k0_tol
+        explore_ok = explore_delta_max <= explore_tol
+        triggered = bool(conf_ok and frozen_ok and k0_ok and explore_ok)
+    return {
+        "enabled": enabled,
+        "triggered": triggered,
+        "ready": ready,
+        "N": N,
+        "min_cycles": min_cycles,
+        "conf_threshold": conf_threshold,
+        "k0_tol": k0_tol,
+        "explore_tol": explore_tol,
+        "conf_tail": conf_tail,
+        "frozen_tail": frozen_tail,
+        "k0D_tail": k0D_tail,
+        "k0P_tail": k0P_tail,
+        "explore_tail": explore_tail,
+        "k0_delta_max": k0_delta_max,
+        "explore_delta_max": explore_delta_max,
+    }
+
 
 def _step_with_checks(sim, total_steps: int, block_size: int, label_prefix: str, outdir: Path) -> None:
     remaining = int(total_steps)
@@ -228,9 +289,14 @@ def _run_equil_cycle(
     last_restart: Optional[RestartRecord],
     metrics: dict[str, object],
     history_etot_mean: list[float],
+    conf_hist: list[float],
+    frozen_hist: list[bool],
+    k0D_hist: list[float],
+    k0P_hist: list[float],
+    explore_hist: list[float],
     latent_pca: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     model_summary: Optional[dict[str, object]] = None,
-) -> RestartRecord:
+) -> tuple[RestartRecord, dict[str, object]]:
     equil_dir = outdir / "equil"
     ensure_dir(equil_dir)
 
@@ -346,6 +412,34 @@ def _run_equil_cycle(
     if bool(getattr(cfg, "safe_mode", False)) and cyc == int(cfg.ncycebstart):
         params.k0D = 0.0
         params.k0P = 0.0
+    conf_value = float(metrics.get("conf_ewma", metrics["gaussian_confidence"]))
+    conf_hist.append(conf_value)
+    k0D_hist.append(float(params.k0D))
+    k0P_hist.append(float(params.k0P))
+    explore_hist.append(float(metrics.get("explore_score", 0.0)))
+    frozen_hist.append(bool(metrics.get("controller_frozen", freeze_bias_update(cfg, metrics))))
+    adaptive_stop = _adaptive_stop_status(
+        cfg,
+        cyc,
+        conf_hist,
+        frozen_hist,
+        k0D_hist,
+        k0P_hist,
+        explore_hist,
+    )
+    if adaptive_stop["enabled"]:
+        controller["adaptive_stop_check"] = {
+            "enabled": bool(adaptive_stop["enabled"]),
+            "triggered": bool(adaptive_stop["triggered"]),
+            "ready": bool(adaptive_stop["ready"]),
+            "N": int(adaptive_stop["N"]),
+            "min_cycles": int(adaptive_stop["min_cycles"]),
+            "conf_threshold": float(adaptive_stop["conf_threshold"]),
+            "k0_tol": float(adaptive_stop["k0_tol"]),
+            "explore_tol": float(adaptive_stop["explore_tol"]),
+            "k0_delta_max": float(adaptive_stop["k0_delta_max"]),
+            "explore_delta_max": float(adaptive_stop["explore_delta_max"]),
+        }
     ref_ed = params.VminD + (params.VmaxD - params.VminD) / max(params.k0D, 1e-12)
     ref_ep = params.VminP + (params.VmaxP - params.VminP) / max(params.k0P, 1e-12)
     bias_plan = {
@@ -418,7 +512,7 @@ def _run_equil_cycle(
         "VminD": VminD_f,"VmaxD": VmaxD_f,"VminP": VminP_f,"VmaxP": VmaxP_f,
         "k0D": k0D_f,"k0P": k0P_f
     }, outdir)
-    return rec
+    return rec, adaptive_stop
 
 def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: RestartRecord) -> RestartRecord:
     prod_dir = outdir / "prod"
@@ -498,8 +592,13 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     model_summary = _load_model_summary(outdir)
     latent_pca = _load_latent_pca_if_any(outdir)
     history_etot_mean: list[float] = []
+    conf_hist: list[float] = []
+    frozen_hist: list[bool] = []
+    k0D_hist: list[float] = []
+    k0P_hist: list[float] = []
+    explore_hist: list[float] = []
     for cyc in range(int(cfg.ncycebstart), int(cfg.ncycebend)):
-        rec = _run_equil_cycle(
+        rec, adaptive_stop = _run_equil_cycle(
             cfg,
             cyc,
             sim,
@@ -507,9 +606,34 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
             rec,
             metrics,
             history_etot_mean,
+            conf_hist,
+            frozen_hist,
+            k0D_hist,
+            k0P_hist,
+            explore_hist,
             latent_pca=latent_pca,
             model_summary=model_summary,
         )
+        if adaptive_stop.get("enabled") and adaptive_stop.get("triggered"):
+            stop_info = {
+                "stop_cycle": int(cyc),
+                "N": int(adaptive_stop["N"]),
+                "thresholds": {
+                    "conf": float(adaptive_stop["conf_threshold"]),
+                    "k0_tol": float(adaptive_stop["k0_tol"]),
+                    "explore_tol": float(adaptive_stop["explore_tol"]),
+                    "min_cycles": int(adaptive_stop["min_cycles"]),
+                },
+                "history_tail": {
+                    "conf": list(adaptive_stop["conf_tail"]),
+                    "k0D": list(adaptive_stop["k0D_tail"]),
+                    "k0P": list(adaptive_stop["k0P_tail"]),
+                    "explore": list(adaptive_stop["explore_tail"]),
+                },
+            }
+            write_json(stop_info, outdir / "adaptive_stop.json")
+            print(f"[ADAPTIVE_STOP] Equilibration stopped early at cycle {cyc}")
+            break
 
     if rec is None:
         restart_path = outdir / "gamd-restart.dat"
