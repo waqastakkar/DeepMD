@@ -37,6 +37,52 @@ The CLI exposes multiple subcommands. The examples below assume the CLI entrypoi
 python -m paddle.cli cmd --config config.yaml --out out_cmd
 ```
 
+### 5 ns CUDA test runs (explicit + implicit)
+
+The CMD stage uses a 2 fs timestep (`dt_ps=0.002`), so **5 ns = 2,500,000 steps**. For a CUDA-backed OpenMM run, set the platform and CUDA parameters in your config, then run the CLI twice (explicit + implicit). Example configs:
+
+**Explicit solvent (CUDA, 5 ns)**
+
+```yaml
+parmFile: topology/protein_solvated.parm7
+crdFile: topology/protein_solvated.rst7
+simType: explicit
+nbCutoff: 10.0
+temperature: 300.0
+ntcmd: 2500000
+cmdRestartFreq: 1000
+platform: CUDA
+precision: mixed
+cuda_device_index: 0
+cuda_precision: mixed
+require_gpu: true
+outdir: out_cmd_explicit_5ns
+```
+
+**Implicit solvent (CUDA, 5 ns)**
+
+```yaml
+parmFile: topology/protein_solvated.parm7
+crdFile: topology/protein_solvated.rst7
+simType: protein.implicit
+temperature: 300.0
+ntcmd: 2500000
+cmdRestartFreq: 1000
+platform: CUDA
+precision: mixed
+cuda_device_index: 0
+cuda_precision: mixed
+require_gpu: true
+outdir: out_cmd_implicit_5ns
+```
+
+Run both 5 ns tests from the CLI:
+
+```bash
+python -m paddle.cli cmd --config config-explicit-5ns.yaml --out out_cmd_explicit_5ns
+python -m paddle.cli cmd --config config-implicit-5ns.yaml --out out_cmd_implicit_5ns
+```
+
 ### Run equilibration prep
 
 ```bash
