@@ -45,7 +45,13 @@ END
     def _vector_length(vec):
         if hasattr(vec, "length"):
             return vec.length()
-        return vec.norm()
+        if hasattr(vec, "norm"):
+            return vec.norm()
+        try:
+            x, y, z = vec
+        except TypeError:
+            x, y, z = vec.x, vec.y, vec.z
+        return (x * x + y * y + z * z) ** 0.5
 
     if solvent_mode == "explicit":
         forcefield = ForceField("amber14-all.xml", "amber14/tip3p.xml")
