@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+from inspect import signature
 import os
 
 from openmm import Platform, unit
@@ -76,14 +77,17 @@ def build_system(
     prmtop = AmberPrmtopFile(parm_file)
     if is_explicit_simtype(sim_type):
         from openmm.app import HBonds, PME
-        system = prmtop.createSystem(
+        create_system_kwargs = dict(
             nonbondedMethod=PME,
             nonbondedCutoff=nb_cutoff_angstrom * unit.angstrom,
             constraints=HBonds,
             rigidWater=rigid_water,
             ewaldErrorTolerance=ewald_error_tolerance,
-            useDispersionCorrection=use_dispersion_correction,
         )
+        create_system_sig = signature(prmtop.createSystem)
+        if "useDispersionCorrection" in create_system_sig.parameters:
+            create_system_kwargs["useDispersionCorrection"] = use_dispersion_correction
+        system = prmtop.createSystem(**create_system_kwargs)
     else:
         from openmm.app import GBn2
         system = prmtop.createSystem(
