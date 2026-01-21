@@ -76,10 +76,16 @@ def is_explicit_simtype(sim_type: str) -> bool:
     return sim_type == "explicit" or sim_type.endswith(".explicit")
 
 
+def ns_to_steps(ns: float, dt_ps: float) -> int:
+    return int(round((ns * 1000.0) / dt_ps))
+
+
+def steps_to_ns(steps: int, dt_ps: float) -> float:
+    return (steps * dt_ps) / 1000.0
+
+
 def _sanity_check_timesteps(cfg: "SimulationConfig") -> None:
-    assert cfg.dt == 0.002
-    assert cfg.ntcmd == 2_500_000
-    assert cfg.ntprodpercyc == 2_500_000
+    cfg.check_timestep_consistency()
 
 
 def _assert_range(name: str, val: float, lo: float | None = None, hi: float | None = None) -> None:
@@ -136,6 +142,9 @@ class SimulationConfig:
     dt: Optional[float] = 0.002
     safe_mode: bool = False
     validate_config: bool = False
+    cmd_ns: float = 5.0
+    equil_ns_per_cycle: float = 5.0
+    prod_ns_per_cycle: float = 5.0
 
     ntcmd: int = 2_500_000
     cmdRestartFreq: int = 100
@@ -204,6 +213,9 @@ class SimulationConfig:
         if self.dt is None:
             self.dt = 0.002
         _assert_range("dt", self.dt, 1e-9)
+        _assert_range("cmd_ns", self.cmd_ns, 1e-12)
+        _assert_range("equil_ns_per_cycle", self.equil_ns_per_cycle, 1e-12)
+        _assert_range("prod_ns_per_cycle", self.prod_ns_per_cycle, 1e-12)
 
         for name in [
             "ntcmd", "cmdRestartFreq", "ntebpreppercyc", "ebprepRestartFreq",
@@ -257,13 +269,83 @@ class SimulationConfig:
         if self.safe_mode or getattr(self, "validate_config", False):
             _sanity_check_timesteps(self)
 
+    def reconcile_time_settings(self, *, input_keys: set[str]) -> None:
+        if self.dt is None:
+            self.dt = 0.002
+        dt_ps = float(self.dt)
+
+        def _check_inconsistency(name: str, expected: int, actual: int, ns_name: str) -> None:
+            if expected != actual:
+                msg = (
+                    f"{name}={actual} is inconsistent with {ns_name}={getattr(self, ns_name)} "
+                    f"and dt={dt_ps}; expected {expected}"
+                )
+                if self.safe_mode:
+                    raise ValueError(msg)
+
+        if "cmd_ns" in input_keys:
+            expected = ns_to_steps(self.cmd_ns, dt_ps)
+            if "ntcmd" in input_keys:
+                _check_inconsistency("ntcmd", expected, self.ntcmd, "cmd_ns")
+            self.ntcmd = expected
+        elif "ntcmd" in input_keys:
+            self.cmd_ns = steps_to_ns(self.ntcmd, dt_ps)
+
+        if "equil_ns_per_cycle" in input_keys:
+            expected = ns_to_steps(self.equil_ns_per_cycle, dt_ps)
+            if "ntebpreppercyc" in input_keys:
+                _check_inconsistency("ntebpreppercyc", expected, self.ntebpreppercyc, "equil_ns_per_cycle")
+            if "ntebpercyc" in input_keys:
+                _check_inconsistency("ntebpercyc", expected, self.ntebpercyc, "equil_ns_per_cycle")
+            self.ntebpreppercyc = expected
+            self.ntebpercyc = expected
+        elif "ntebpercyc" in input_keys:
+            self.equil_ns_per_cycle = steps_to_ns(self.ntebpercyc, dt_ps)
+        elif "ntebpreppercyc" in input_keys:
+            self.equil_ns_per_cycle = steps_to_ns(self.ntebpreppercyc, dt_ps)
+
+        if "prod_ns_per_cycle" in input_keys:
+            expected = ns_to_steps(self.prod_ns_per_cycle, dt_ps)
+            if "ntprodpercyc" in input_keys:
+                _check_inconsistency("ntprodpercyc", expected, self.ntprodpercyc, "prod_ns_per_cycle")
+            self.ntprodpercyc = expected
+        elif "ntprodpercyc" in input_keys:
+            self.prod_ns_per_cycle = steps_to_ns(self.ntprodpercyc, dt_ps)
+
+    def check_timestep_consistency(self) -> None:
+        if self.dt is None:
+            self.dt = 0.002
+        dt_ps = float(self.dt)
+        expected_cmd = ns_to_steps(self.cmd_ns, dt_ps)
+        expected_equil = ns_to_steps(self.equil_ns_per_cycle, dt_ps)
+        expected_prod = ns_to_steps(self.prod_ns_per_cycle, dt_ps)
+        if self.ntcmd != expected_cmd:
+            raise ValueError(f"ntcmd={self.ntcmd} does not match cmd_ns={self.cmd_ns} (expected {expected_cmd})")
+        if self.ntebpreppercyc != expected_equil:
+            raise ValueError(
+                f"ntebpreppercyc={self.ntebpreppercyc} does not match equil_ns_per_cycle="
+                f"{self.equil_ns_per_cycle} (expected {expected_equil})"
+            )
+        if self.ntebpercyc != expected_equil:
+            raise ValueError(
+                f"ntebpercyc={self.ntebpercyc} does not match equil_ns_per_cycle="
+                f"{self.equil_ns_per_cycle} (expected {expected_equil})"
+            )
+        if self.ntprodpercyc != expected_prod:
+            raise ValueError(
+                f"ntprodpercyc={self.ntprodpercyc} does not match prod_ns_per_cycle="
+                f"{self.prod_ns_per_cycle} (expected {expected_prod})"
+            )
+
     def as_dict(self) -> Dict[str, Any]:
         return dc.asdict(self)
 
     def to_yaml(self) -> str:
         if yaml is None:
             raise RuntimeError("pyyaml is not installed. Install with: pip install pyyaml")
-        return yaml.safe_dump(self.as_dict(), sort_keys=False)
+        data = self.as_dict()
+        data["dt"] = 0.002
+        return yaml.safe_dump(data, sort_keys=False)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.as_dict(), indent=indent)
@@ -271,6 +353,7 @@ class SimulationConfig:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "SimulationConfig":
         cfg = SimulationConfig(**d)
+        cfg.reconcile_time_settings(input_keys=set(d.keys()))
         cfg.validate()
         return cfg
 
@@ -338,6 +421,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--simType", type=str, default=None)
     ap.add_argument("--nbCutoff", type=float, default=None)
     ap.add_argument("--temperature", type=float, default=None)
+    ap.add_argument("--cmd_ns", type=float, default=None)
+    ap.add_argument("--equil_ns_per_cycle", type=float, default=None)
+    ap.add_argument("--prod_ns_per_cycle", type=float, default=None)
     ap.add_argument("--ntcmd", type=int, default=None)
     ap.add_argument("--cmdRestartFreq", type=int, default=None)
     ap.add_argument("--ncycebprepstart", type=int, default=None)
@@ -371,14 +457,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _apply_overrides(cfg: SimulationConfig, ns: argparse.Namespace) -> SimulationConfig:
+    overridden: set[str] = set()
     for field in dc.fields(SimulationConfig):
         key = field.name
         if hasattr(ns, key):
             val = getattr(ns, key)
             if val is not None:
                 setattr(cfg, key, val)
+                overridden.add(key)
     if getattr(ns, "deterministic_forces", False):
         cfg.deterministic_forces = True
+        overridden.add("deterministic_forces")
+    if overridden & {
+        "cmd_ns",
+        "equil_ns_per_cycle",
+        "prod_ns_per_cycle",
+        "ntcmd",
+        "ntebpreppercyc",
+        "ntebpercyc",
+        "ntprodpercyc",
+    }:
+        cfg.reconcile_time_settings(input_keys=overridden)
     return cfg
 
 

@@ -11,13 +11,28 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 
-from paddle.config import SimulationConfig
+from paddle.config import SimulationConfig, is_explicit_simtype, ns_to_steps
 
 
 def _resolve_outdir(base: str | None, default: str) -> Path:
     p = Path(base) if base else Path(default)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _format_ns(value: float) -> str:
+    rounded = round(value)
+    if abs(value - rounded) < 1e-9:
+        return str(int(rounded))
+    return f"{value:g}"
+
+
+def _default_config_name(cfg: SimulationConfig) -> str:
+    simtag = "explicit" if is_explicit_simtype(cfg.simType) else "implicit"
+    cmd_tag = _format_ns(cfg.cmd_ns)
+    equil_tag = _format_ns(cfg.equil_ns_per_cycle)
+    prod_tag = _format_ns(cfg.prod_ns_per_cycle)
+    return f"config-{simtag}-cmd{cmd_tag}ns-equil{equil_tag}ns-prod{prod_tag}ns.yml"
 
 
 def cmd_cmd(ns):
@@ -182,6 +197,10 @@ def cmd_bench_alanine(ns):
 def cmd_make_configs(ns):
     out_dir = Path(ns.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    dt_ps = 0.002
+    cmd_steps = ns_to_steps(ns.cmd_ns, dt_ps)
+    equil_steps = ns_to_steps(ns.equil_ns_per_cycle, dt_ps)
+    prod_steps = ns_to_steps(ns.prod_ns_per_cycle, dt_ps)
 
     explicit_cfg = SimulationConfig(
         parmFile="topology/complex.parm7",
@@ -189,8 +208,15 @@ def cmd_make_configs(ns):
         simType="protein.explicit",
         nbCutoff=10.0,
         temperature=300.0,
-        ntcmd=2_500_000,
+        dt=dt_ps,
+        cmd_ns=ns.cmd_ns,
+        equil_ns_per_cycle=ns.equil_ns_per_cycle,
+        prod_ns_per_cycle=ns.prod_ns_per_cycle,
+        ntcmd=cmd_steps,
         cmdRestartFreq=1000,
+        ntebpreppercyc=equil_steps,
+        ntebpercyc=equil_steps,
+        ntprodpercyc=prod_steps,
         platform="CUDA",
         precision="mixed",
         cuda_device_index=0,
@@ -203,8 +229,15 @@ def cmd_make_configs(ns):
         crdFile="topology/complex.rst7",
         simType="protein.implicit",
         temperature=300.0,
-        ntcmd=2_500_000,
+        dt=dt_ps,
+        cmd_ns=ns.cmd_ns,
+        equil_ns_per_cycle=ns.equil_ns_per_cycle,
+        prod_ns_per_cycle=ns.prod_ns_per_cycle,
+        ntcmd=cmd_steps,
         cmdRestartFreq=1000,
+        ntebpreppercyc=equil_steps,
+        ntebpercyc=equil_steps,
+        ntprodpercyc=prod_steps,
         platform="CUDA",
         precision="mixed",
         cuda_device_index=0,
@@ -213,8 +246,16 @@ def cmd_make_configs(ns):
         outdir="out_cmd_implicit_5ns",
     )
 
-    explicit_path = out_dir / "config-explicit-5ns.yaml"
-    implicit_path = out_dir / "config-implicit-5ns.yaml"
+    explicit_path = (
+        Path(ns.explicit_config)
+        if ns.explicit_config
+        else out_dir / _default_config_name(explicit_cfg)
+    )
+    implicit_path = (
+        Path(ns.implicit_config)
+        if ns.implicit_config
+        else out_dir / _default_config_name(implicit_cfg)
+    )
     explicit_path.write_text(explicit_cfg.to_yaml(), encoding="utf-8")
     implicit_path.write_text(implicit_cfg.to_yaml(), encoding="utf-8")
     print(f"Wrote: {explicit_path}")
@@ -294,6 +335,11 @@ def build_parser():
     p.set_defaults(func=cmd_bench_alanine)
     p = sub.add_parser("make_configs", help="Generate example YAML configs for explicit/implicit CMD runs")
     p.add_argument("--out", default="configs")
+    p.add_argument("--cmd-ns", dest="cmd_ns", type=float, default=5.0)
+    p.add_argument("--equil-ns-per-cycle", dest="equil_ns_per_cycle", type=float, default=5.0)
+    p.add_argument("--prod-ns-per-cycle", dest="prod_ns_per_cycle", type=float, default=5.0)
+    p.add_argument("--explicit-config", default=None, help="Optional explicit config filename override")
+    p.add_argument("--implicit-config", default=None, help="Optional implicit config filename override")
     p.set_defaults(func=cmd_make_configs)
     return ap
 
