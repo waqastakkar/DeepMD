@@ -4,14 +4,22 @@ from __future__ import annotations
 from io import StringIO
 
 
-def build_alanine_ace_ala_nme_system():
+def build_alanine_ace_ala_nme_system(solvent: str = "explicit"):
     """Return topology, system, and positions for alanine dipeptide.
 
     The structure is provided as a minimal ACE–ALA–NME PDB and hydrated with
-    hydrogens using the Amber14 force field. The system is configured for
-    implicit solvent with GBn2 and no cutoff for long-range interactions.
+    hydrogens using the Amber14 force field.
     """
-    from openmm.app import ForceField, GBn2, HBonds, Modeller, NoCutoff, PDBFile
+    from openmm import unit
+    from openmm.app import (
+        ForceField,
+        GBn2,
+        HBonds,
+        Modeller,
+        NoCutoff,
+        PDBFile,
+        PME,
+    )
 
     pdb_text = """
 ATOM      1  CH3 ACE A   1      -0.046  -0.001  -0.003  1.00  0.00           C
@@ -29,16 +37,48 @@ END
 """
 
     pdb = PDBFile(StringIO(pdb_text))
-    forcefield = ForceField("amber14/protein.ff14SB.xml")
+
+    solvent_mode = solvent.lower()
+    if solvent_mode not in {"explicit", "implicit"}:
+        raise ValueError("Solvent mode must be 'explicit' or 'implicit'.")
+
+    if solvent_mode == "explicit":
+        forcefield = ForceField("amber14-all.xml", "amber14/tip3p.xml")
+    else:
+        forcefield = ForceField("amber14/protein.ff14SB.xml")
+
     modeller = Modeller(pdb.topology, pdb.positions)
     modeller.addHydrogens(forcefield)
 
-    system = forcefield.createSystem(
-        modeller.topology,
-        nonbondedMethod=NoCutoff,
-        constraints=HBonds,
-        implicitSolvent=GBn2,
-    )
+    if solvent_mode == "explicit":
+        modeller.addSolvent(
+            forcefield,
+            model="tip3p",
+            padding=0.8 * unit.nanometer,
+        )
+        system = forcefield.createSystem(
+            modeller.topology,
+            nonbondedMethod=PME,
+            nonbondedCutoff=1.0 * unit.nanometer,
+            constraints=HBonds,
+            rigidWater=True,
+            ewaldErrorTolerance=1e-4,
+        )
+    else:
+        try:
+            system = forcefield.createSystem(
+                modeller.topology,
+                nonbondedMethod=NoCutoff,
+                constraints=HBonds,
+                implicitSolvent=GBn2,
+            )
+        except ValueError as exc:
+            if "implicitSolvent was specified but never used" in str(exc):
+                raise ValueError(
+                    "Implicit solvent not supported by selected ForceField XML; "
+                    "use explicit or change XML"
+                ) from exc
+            raise
 
     positions = modeller.positions
     return modeller.topology, system, positions
