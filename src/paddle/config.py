@@ -88,6 +88,8 @@ class SimulationConfig:
     nbCutoff: float = 10.0                             
 
     temperature: float = 300.0
+    dt: Optional[float] = None
+    safe_mode: bool = False
 
     ntcmd: int = 10_000_000
     cmdRestartFreq: int = 100
@@ -138,6 +140,8 @@ class SimulationConfig:
 
         _assert_range("nbCutoff", self.nbCutoff, 0.0, 50.0)
         _assert_range("temperature", self.temperature, 1.0, 2000.0)
+        if self.dt is not None:
+            _assert_range("dt", self.dt, 1e-9)
 
         for name in [
             "ntcmd", "cmdRestartFreq", "ntebpreppercyc", "ebprepRestartFreq",

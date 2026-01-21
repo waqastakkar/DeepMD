@@ -11,7 +11,7 @@ from openmm import XmlSerializer, unit
 from openmm.app import DCDReporter, StateDataReporter
 import openmm as mm
 from paddle.config import SimulationConfig, set_global_seed
-from paddle.core.engine import EngineOptions, create_simulation, minimize_and_initialize
+from paddle.core.engine import EngineOptions, create_simulation
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
@@ -55,6 +55,77 @@ def _assign_force_groups(sim) -> None:
     for force in sim.system.getForces():
         if force.__class__.__name__ == "PeriodicTorsionForce":
             force.setForceGroup(2)
+
+def _compute_temperature_k(state, sim) -> Optional[float]:
+    try:
+        kinetic = state.getKineticEnergy()
+    except Exception:
+        return None
+    if kinetic is None:
+        return None
+    try:
+        ndof = 3 * sim.system.getNumParticles()
+        ndof -= sim.system.getNumConstraints()
+        if sim.system.usesPeriodicBoundaryConditions():
+            ndof -= 3
+    except Exception:
+        return None
+    if ndof <= 0:
+        return None
+    try:
+        temperature = (2 * kinetic) / (ndof * unit.MOLAR_GAS_CONSTANT_R)
+        return float(temperature.value_in_unit(unit.kelvin))
+    except Exception:
+        return None
+
+
+def _check_state_finite(sim, label: str, outdir: Path) -> None:
+    ensure_dir(outdir)
+    state = sim.context.getState(getPositions=True, getEnergy=True)
+    positions = state.getPositions(asNumpy=True)
+    positions_ok = False
+    if positions is not None:
+        positions_nm = positions.value_in_unit(unit.nanometer)
+        positions_ok = bool(np.isfinite(positions_nm).all())
+    potential = state.getPotentialEnergy()
+    potential_kj = None
+    potential_ok = False
+    if potential is not None:
+        potential_kj = float(potential.value_in_unit(unit.kilojoule_per_mole))
+        potential_ok = bool(np.isfinite(potential_kj))
+    if positions_ok and potential_ok:
+        return
+    failed_state = outdir / f"failed_state_{label}.xml"
+    failed_state.write_text(XmlSerializer.serialize(state), encoding="utf-8")
+    diagnostics = {
+        "step": int(getattr(state, "getStepCount", lambda: 0)()),
+        "potential_energy_kj_mol": potential_kj,
+        "temperature_k": _compute_temperature_k(state, sim),
+    }
+    write_json(diagnostics, outdir / f"failed_state_{label}.json")
+    raise RuntimeError(
+        f"Non-finite state detected ({label}). "
+        f"Saved diagnostics to {failed_state}."
+    )
+
+
+def _resolve_dt_ps(cfg: SimulationConfig, default: float = 0.002) -> float:
+    dt = getattr(cfg, "dt", None)
+    if dt is None:
+        return default
+    return float(dt)
+
+
+def _step_with_checks(sim, total_steps: int, block_size: int, label_prefix: str, outdir: Path) -> None:
+    remaining = int(total_steps)
+    block = max(1, int(block_size))
+    block_index = 0
+    while remaining > 0:
+        step_now = min(block, remaining)
+        sim.step(step_now)
+        _check_state_finite(sim, f"{label_prefix}_block{block_index:04d}", outdir)
+        remaining -= step_now
+        block_index += 1
 
 
 def _load_model_summary(outdir: Path) -> Optional[dict[str, object]]:
@@ -158,6 +229,9 @@ def _run_equil_cycle(
         metrics=metrics,
         model_summary=model_summary,
     )
+    if bool(getattr(cfg, "safe_mode", False)) and cyc == int(cfg.ncycebstart):
+        params.k0D = 0.0
+        params.k0P = 0.0
     ref_ed = params.VminD + (params.VmaxD - params.VminD) / max(params.k0D, 1e-12)
     ref_ep = params.VminP + (params.VmaxP - params.VminP) / max(params.k0P, 1e-12)
     bias_plan = {
@@ -183,7 +257,7 @@ def _run_equil_cycle(
         bias_plan["model_summary"] = model_summary
     write_json(bias_plan, outdir / f"bias_plan_cycle_{cyc}.json")
 
-    integ = make_dual_equil(dt_ps=0.002, temperature_K=cfg.temperature, params=params)
+    integ = make_dual_equil(dt_ps=_resolve_dt_ps(cfg), temperature_K=cfg.temperature, params=params)
 
     # ---- NEW: bind the new integrator
     _attach_integrator(sim, integ)
@@ -198,7 +272,7 @@ def _run_equil_cycle(
         temperature=True, density=True, speed=True, separator="\t",
     ))
 
-    sim.step(cfg.ntebpercyc)
+    _step_with_checks(sim, cfg.ntebpercyc, cfg.ebRestartFreq, f"equil_cycle{cyc:02d}", outdir)
 
     VminD_f = float(integ.getGlobalVariableByName("VminD"))
     VmaxD_f = float(integ.getGlobalVariableByName("VmaxD"))
@@ -247,7 +321,7 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
         temperature=True, density=True, speed=True, separator="\t",
     ))
 
-    sim.step(cfg.ntprodpercyc)
+    _step_with_checks(sim, cfg.ntprodpercyc, cfg.prodRestartFreq, f"prod_cycle{cyc:02d}", outdir)
 
     VminD_f = float(integ.getGlobalVariableByName("VminD"))
     VmaxD_f = float(integ.getGlobalVariableByName("VmaxD"))
@@ -281,7 +355,10 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
 
     loaded = _load_cmd_checkpoint_if_any(sim, outdir)
     if not loaded:
-        minimize_and_initialize(sim, cfg.temperature, set_velocities=True)
+        sim.minimizeEnergy()
+        _check_state_finite(sim, "minimize", outdir)
+        sim.context.setVelocitiesToTemperature(cfg.temperature * unit.kelvin)
+        _check_state_finite(sim, "velocities", outdir)
 
     write_run_manifest(outdir, {
         "stage": "equil+prod",
