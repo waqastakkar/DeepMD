@@ -184,9 +184,9 @@ def cmd_make_configs(ns):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     explicit_cfg = SimulationConfig(
-        parmFile="topology/protein_solvated.parm7",
-        crdFile="topology/protein_solvated.rst7",
-        simType="explicit",
+        parmFile="topology/complex.parm7",
+        crdFile="topology/complex.rst7",
+        simType="protein.explicit",
         nbCutoff=10.0,
         temperature=300.0,
         ntcmd=2_500_000,
@@ -199,8 +199,8 @@ def cmd_make_configs(ns):
         outdir="out_cmd_explicit_5ns",
     )
     implicit_cfg = SimulationConfig(
-        parmFile="topology/protein_solvated.parm7",
-        crdFile="topology/protein_solvated.rst7",
+        parmFile="topology/complex.parm7",
+        crdFile="topology/complex.rst7",
         simType="protein.implicit",
         temperature=300.0,
         ntcmd=2_500_000,

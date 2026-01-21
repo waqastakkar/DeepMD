@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from openmm import XmlSerializer, unit
 
-from paddle.config import SimulationConfig, set_global_seed
+from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation, minimize_and_initialize
 from paddle.core.integrators import make_conventional
 from paddle.io.report import CSVLogger, ensure_dir, write_run_manifest, append_metrics
@@ -18,7 +18,7 @@ def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
         platform_name=cfg.platform,
         precision=cfg.precision,
         deterministic_forces=cfg.deterministic_forces,
-        add_barostat=(cfg.simType == "explicit"),
+        add_barostat=is_explicit_simtype(cfg.simType),
         barostat_pressure_atm=1.0,
         barostat_interval=25,
     )

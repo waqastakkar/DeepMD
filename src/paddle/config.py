@@ -31,10 +31,55 @@ except Exception:
 
 def _coerce_simtype(s: str) -> str:
     s = s.strip()
-    allowed = {"explicit", "protein.implicit", "RNA.implicit"}
+    if s == "explicit":
+        return "protein.explicit"
+    allowed = {"protein.explicit", "protein.implicit", "RNA.implicit"}
     if s not in allowed:
         raise ValueError(f"simType must be one of {sorted(allowed)}, got: {s}")
     return s
+
+
+def _rst7_has_box_vectors(path: Path) -> bool:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return False
+    if len(lines) < 2:
+        return False
+    header = lines[1].split()
+    if not header:
+        return False
+    try:
+        natoms = int(float(header[0]))
+    except Exception:
+        return False
+    coord_tokens = " ".join(lines[2:]).split()
+    if natoms <= 0:
+        return False
+    expected_coords = 3 * natoms
+    return len(coord_tokens) >= expected_coords + 6
+
+
+def _infer_simtype(parm_file: str, crd_file: str) -> Optional[str]:
+    parm_name = Path(parm_file).name.lower() if parm_file else ""
+    if "solv" in parm_name:
+        return "protein.explicit"
+    crd_path = Path(crd_file) if crd_file else None
+    if crd_path and crd_path.exists() and _rst7_has_box_vectors(crd_path):
+        return "protein.explicit"
+    if parm_file or crd_file:
+        return "protein.implicit"
+    return None
+
+
+def is_explicit_simtype(sim_type: str) -> bool:
+    return sim_type == "explicit" or sim_type.endswith(".explicit")
+
+
+def _sanity_check_timesteps(cfg: "SimulationConfig") -> None:
+    assert cfg.dt == 0.002
+    assert cfg.ntcmd == 2_500_000
+    assert cfg.ntprodpercyc == 2_500_000
 
 
 def _assert_range(name: str, val: float, lo: float | None = None, hi: float | None = None) -> None:
@@ -78,20 +123,21 @@ def set_global_seed(seed: int) -> None:
 @dataclass
 class SimulationConfig:
     # Use the solvated Amber files you built in tleap
-    parmFile: str = "topology/protein_solvated.parm7"  # was Name.top
-    crdFile:  str = "topology/protein_solvated.rst7"  # was Name.crd
+    parmFile: str = "topology/complex.parm7"  # was Name.top
+    crdFile:  str = "topology/complex.rst7"  # was Name.crd
 
     # Explicit solvent mode (this flips engine.py to PME + HBonds + barostat)
-    simType: str = "explicit"                           
+    simType: str = "protein.explicit"
 
     # Explicit-water friendly cutoff
     nbCutoff: float = 10.0                             
 
     temperature: float = 300.0
-    dt: Optional[float] = None
+    dt: Optional[float] = 0.002
     safe_mode: bool = False
+    validate_config: bool = False
 
-    ntcmd: int = 10_000_000
+    ntcmd: int = 2_500_000
     cmdRestartFreq: int = 100
 
     ncycebprepstart: int = 0
@@ -106,7 +152,7 @@ class SimulationConfig:
 
     ncycprodstart: int = 0
     ncycprodend: int = 4
-    ntprodpercyc: int = 250_000_000
+    ntprodpercyc: int = 2_500_000
     prodRestartFreq: int = 500
 
     refEP_factor: float = 0.05
@@ -149,11 +195,15 @@ class SimulationConfig:
         _exists_if_set(Path(self.parmFile), "parmFile")
         _exists_if_set(Path(self.crdFile), "crdFile")
         self.simType = _coerce_simtype(self.simType)
+        inferred = _infer_simtype(self.parmFile, self.crdFile)
+        if inferred and self.simType != inferred:
+            self.simType = inferred
 
         _assert_range("nbCutoff", self.nbCutoff, 0.0, 50.0)
         _assert_range("temperature", self.temperature, 1.0, 2000.0)
-        if self.dt is not None:
-            _assert_range("dt", self.dt, 1e-9)
+        if self.dt is None:
+            self.dt = 0.002
+        _assert_range("dt", self.dt, 1e-9)
 
         for name in [
             "ntcmd", "cmdRestartFreq", "ntebpreppercyc", "ebprepRestartFreq",
@@ -204,6 +254,8 @@ class SimulationConfig:
             raise ValueError("require_gpu is true but platform is not CUDA")
 
         Path(self.outdir).mkdir(parents=True, exist_ok=True)
+        if self.safe_mode or getattr(self, "validate_config", False):
+            _sanity_check_timesteps(self)
 
     def as_dict(self) -> Dict[str, Any]:
         return dc.asdict(self)
