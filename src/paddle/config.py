@@ -108,6 +108,9 @@ class SimulationConfig:
 
     platform: str = "CUDA"
     precision: str = "mixed"
+    require_gpu: bool = False
+    cuda_device_index: int = 0
+    cuda_precision: str = "mixed"
     deterministic_forces: bool = False  # set True if you need bitwise reproducibility
 
     seed: int = 2025
@@ -148,6 +151,10 @@ class SimulationConfig:
 
         if self.precision not in {"single", "mixed", "double"}:
             raise ValueError("precision must be one of: single|mixed|double")
+        if self.cuda_precision not in {"single", "mixed", "double"}:
+            raise ValueError("cuda_precision must be one of: single|mixed|double")
+        if self.require_gpu and self.platform != "CUDA":
+            raise ValueError("require_gpu is true but platform is not CUDA")
 
         Path(self.outdir).mkdir(parents=True, exist_ok=True)
 
@@ -249,6 +256,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--refED_factor", type=float, default=None)
     ap.add_argument("--platform", type=str, default=None)
     ap.add_argument("--precision", type=str, default=None)
+    ap.add_argument("--require_gpu", action="store_true", default=None)
+    ap.add_argument("--cuda_device_index", type=int, default=None)
+    ap.add_argument("--cuda_precision", type=str, default=None)
     ap.add_argument("--deterministic_forces", action="store_true")
     ap.add_argument("--outdir", type=str, default=None)
     ap.add_argument("--seed", type=int, default=None)
