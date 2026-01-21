@@ -12,6 +12,10 @@ from openmm import Platform, unit
 from openmm.app import AmberInpcrdFile, AmberPrmtopFile, Simulation
 
 
+def is_explicit_simtype(sim_type: str) -> bool:
+    return sim_type == "explicit" or sim_type.endswith(".explicit")
+
+
 @dataclass
 class EngineOptions:
     sim_type: str = "RNA.implicit"
@@ -70,7 +74,7 @@ def build_system(
     rigid_water: bool,
 ):
     prmtop = AmberPrmtopFile(parm_file)
-    if sim_type == "explicit":
+    if is_explicit_simtype(sim_type):
         from openmm.app import HBonds, PME
         system = prmtop.createSystem(
             nonbondedMethod=PME,
@@ -101,7 +105,7 @@ def create_simulation(parm_file: str, crd_file: str, integrator, options: Engine
         rigid_water=options.rigid_water,
     )
 
-    if options.sim_type == "explicit" and options.add_barostat:
+    if is_explicit_simtype(options.sim_type) and options.add_barostat:
         from openmm import MonteCarloBarostat
         system.addForce(
             MonteCarloBarostat(
@@ -110,6 +114,7 @@ def create_simulation(parm_file: str, crd_file: str, integrator, options: Engine
                 options.barostat_interval,
             )
         )
+        print("Explicit solvent detected → MonteCarloBarostat enabled")
 
     plat, props = get_platform(
         options.platform_name,
