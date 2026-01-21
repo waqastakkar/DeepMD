@@ -56,3 +56,21 @@ python benchmarks/alanine/run_benchmark.py \
 - The runtime report includes the elapsed time and steps/second to help compare
   runs across hardware.
 - To run GPU smoke tests locally, use `RUN_GPU_TESTS=1 pytest -q -m gpu`.
+
+## OpenMM CUDA alanine dipeptide MD test
+
+The repository includes an opt-in, real OpenMM CUDA integration test that runs
+alanine dipeptide (ACE–ALA–NME) in implicit solvent. The default config runs the
+full 5 ns benchmark.
+
+Run the full benchmark (5 ns):
+
+```bash
+python cli.py mdtest_alanine --config benchmarks/alanine_mdtest/config.yml
+```
+
+Run the short GPU test (50 ps) used by pytest:
+
+```bash
+RUN_GPU_TESTS=1 pytest -q -m gpu
+```

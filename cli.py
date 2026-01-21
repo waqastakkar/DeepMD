@@ -113,6 +113,12 @@ def cmd_bench_alanine(ns):
     for label, path in locations.items():
         print(f"{label}: {path}")
 
+def cmd_mdtest_alanine(ns):
+    from paddle.bench.mdtest import run_alanine_mdtest
+
+    outdir = run_alanine_mdtest(Path(ns.config))
+    print(f"MD test outputs: {outdir}")
+
 def build_parser():
     ap = argparse.ArgumentParser(description="paddle CLI")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -147,6 +153,9 @@ def build_parser():
     p = sub.add_parser("bench_alanine", help="Generate alanine dipeptide benchmarks with tleap")
     p.add_argument("--out", default="benchmarks/alanine")
     p.set_defaults(func=cmd_bench_alanine)
+    p = sub.add_parser("mdtest_alanine", help="Run OpenMM CUDA alanine dipeptide MD test")
+    p.add_argument("--config", default="benchmarks/alanine_mdtest/config.yml")
+    p.set_defaults(func=cmd_mdtest_alanine)
     return ap
 
 def main(argv=None) -> int:
