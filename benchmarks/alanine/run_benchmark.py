@@ -15,8 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from validate.metrics import gaussianity_report, write_report_json
-from validate.pmf import pmf_from_series, save_pmf_json
+from paddle.validate.metrics import gaussianity_report, write_report_json
+from paddle.validate.pmf import pmf_from_series, save_pmf_json
 
 
 def _load_config(path: Path) -> dict[str, object]:

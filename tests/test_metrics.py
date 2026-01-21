@@ -1,6 +1,15 @@
-import numpy as np
+from pathlib import Path
+import sys
 
-from validate.metrics import gaussianity_report
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+np = pytest.importorskip("numpy")
+
+from paddle.validate.metrics import gaussianity_report
 
 
 def test_gaussianity_report_on_gaussian():

@@ -15,8 +15,8 @@ from paddle.core.engine import EngineOptions, create_simulation, minimize_and_in
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
-from policy import propose_boost_params
-from validate.metrics import gaussianity_report
+from paddle.policy import propose_boost_params
+from paddle.validate.metrics import gaussianity_report
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
