@@ -10,7 +10,7 @@ import numpy as np
 from openmm import XmlSerializer, unit
 from openmm.app import DCDReporter, StateDataReporter
 import openmm as mm
-from paddle.config import SimulationConfig, set_global_seed
+from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
@@ -324,7 +324,7 @@ def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
         platform_name=cfg.platform,
         precision=cfg.precision,
         deterministic_forces=cfg.deterministic_forces,
-        add_barostat=(cfg.simType == "explicit"),
+        add_barostat=is_explicit_simtype(cfg.simType),
         barostat_pressure_atm=1.0,
         barostat_interval=25,
     )
