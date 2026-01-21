@@ -52,6 +52,36 @@ def _sanitize_bounds(vmin: float, vmax: float) -> tuple[float, float]:
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
+def _linear_confidence(value: Optional[float], good: float, freeze: float) -> float:
+    if value is None:
+        return 0.0
+    span = freeze - good
+    if span <= 0:
+        return 0.0 if abs(value) >= freeze else 1.0
+    if abs(value) <= good:
+        return 1.0
+    if abs(value) >= freeze:
+        return 0.0
+    return (freeze - abs(value)) / span
+
+def _gaussian_confidence_from_values(
+    cfg,
+    skew: Optional[float],
+    kurtosis: Optional[float],
+    tail: Optional[float],
+) -> float:
+    skew_good = float(getattr(cfg, "gaussian_skew_good", _SKEW_GOOD))
+    skew_freeze = float(getattr(cfg, "gaussian_skew_freeze", _SKEW_FREEZE))
+    kurtosis_good = float(getattr(cfg, "gaussian_excess_kurtosis_good", _KURTOSIS_GOOD))
+    kurtosis_freeze = float(getattr(cfg, "gaussian_excess_kurtosis_freeze", _KURTOSIS_FREEZE))
+    tail_good = float(getattr(cfg, "gaussian_tail_risk_good", _TAIL_RISK_GOOD))
+    tail_freeze = float(getattr(cfg, "gaussian_tail_risk_freeze", _TAIL_RISK_FREEZE))
+
+    conf_skew = _linear_confidence(skew, skew_good, skew_freeze)
+    conf_kurt = _linear_confidence(kurtosis, kurtosis_good, kurtosis_freeze)
+    conf_tail = _linear_confidence(tail, tail_good, tail_freeze)
+    return min(conf_skew, conf_kurt, conf_tail)
+
 
 def _uncertainty_is_low(model_summary: Optional[Mapping[str, object]]) -> bool:
     if model_summary is None:
@@ -64,33 +94,18 @@ def _uncertainty_is_low(model_summary: Optional[Mapping[str, object]]) -> bool:
 
 def gaussian_confidence(cfg, metrics: Mapping[str, object]) -> float:
     """Return a conservative Gaussianity confidence in [0, 1]."""
-    skew_good = float(getattr(cfg, "gaussian_skew_good", _SKEW_GOOD))
-    skew_freeze = float(getattr(cfg, "gaussian_skew_freeze", _SKEW_FREEZE))
-    kurtosis_good = float(getattr(cfg, "gaussian_excess_kurtosis_good", _KURTOSIS_GOOD))
-    kurtosis_freeze = float(getattr(cfg, "gaussian_excess_kurtosis_freeze", _KURTOSIS_FREEZE))
-    tail_good = float(getattr(cfg, "gaussian_tail_risk_good", _TAIL_RISK_GOOD))
-    tail_freeze = float(getattr(cfg, "gaussian_tail_risk_freeze", _TAIL_RISK_FREEZE))
-
-    def _linear_confidence(value: Optional[float], good: float, freeze: float) -> float:
-        if value is None:
-            return 0.0
-        span = freeze - good
-        if span <= 0:
-            return 0.0 if abs(value) >= freeze else 1.0
-        if abs(value) <= good:
-            return 1.0
-        if abs(value) >= freeze:
-            return 0.0
-        return (freeze - abs(value)) / span
-
     skew = _metric(metrics, "skew", "skewness", "skew_proxy", "skewness_proxy")
     kurtosis = _metric(metrics, "kurtosis", "excess_kurtosis", "kurtosis_proxy", "excess_kurtosis_proxy")
     tail = _metric(metrics, "tail_risk", "tail_risk_proxy")
+    energy_conf = _gaussian_confidence_from_values(cfg, skew, kurtosis, tail)
 
-    conf_skew = _linear_confidence(skew, skew_good, skew_freeze)
-    conf_kurt = _linear_confidence(kurtosis, kurtosis_good, kurtosis_freeze)
-    conf_tail = _linear_confidence(tail, tail_good, tail_freeze)
-    return min(conf_skew, conf_kurt, conf_tail)
+    latent_skew = _metric(metrics, "latent_skewness", "latent_skew")
+    latent_kurtosis = _metric(metrics, "latent_excess_kurtosis", "latent_kurtosis")
+    latent_tail = _metric(metrics, "latent_tail_risk")
+    if latent_skew is not None and latent_kurtosis is not None and latent_tail is not None:
+        latent_conf = _gaussian_confidence_from_values(cfg, latent_skew, latent_kurtosis, latent_tail)
+        return min(energy_conf, latent_conf)
+    return energy_conf
 
 
 def freeze_bias_update(cfg, metrics: Mapping[str, object]) -> bool:
@@ -105,12 +120,25 @@ def freeze_bias_update(cfg, metrics: Mapping[str, object]) -> bool:
     kurtosis = _metric(metrics, "kurtosis", "excess_kurtosis", "kurtosis_proxy", "excess_kurtosis_proxy")
     tail = _metric(metrics, "tail_risk", "tail_risk_proxy")
     if skew is None or kurtosis is None or tail is None:
-        return True
-    return (
-        abs(skew) >= skew_freeze
-        or abs(kurtosis) >= kurtosis_freeze
-        or abs(tail) >= tail_freeze
-    )
+        energy_freeze = True
+    else:
+        energy_freeze = (
+            abs(skew) >= skew_freeze
+            or abs(kurtosis) >= kurtosis_freeze
+            or abs(tail) >= tail_freeze
+        )
+
+    latent_skew = _metric(metrics, "latent_skewness", "latent_skew")
+    latent_kurtosis = _metric(metrics, "latent_excess_kurtosis", "latent_kurtosis")
+    latent_tail = _metric(metrics, "latent_tail_risk")
+    latent_freeze = False
+    if latent_skew is not None and latent_kurtosis is not None and latent_tail is not None:
+        latent_freeze = (
+            abs(latent_skew) >= skew_freeze
+            or abs(latent_kurtosis) >= kurtosis_freeze
+            or abs(latent_tail) >= tail_freeze
+        )
+    return energy_freeze or latent_freeze
 
 
 def uncertainty_scale(cfg, model_summary: Optional[Mapping[str, object]]) -> float:

@@ -149,6 +149,16 @@ def load_npz_bundle(path: str | Path):
     data = np.load(path)
     return data["X"], data["y"]
 
+def project_pca(X: np.ndarray, mean: np.ndarray, components: np.ndarray) -> np.ndarray:
+    X = np.asarray(X, dtype=float)
+    return (X - mean) @ components.T
+
+def load_latent_pca(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    mean = np.asarray(payload["mean"], dtype=float)
+    components = np.asarray(payload["components"], dtype=float)
+    return mean, components
+
 def as_tf_dataset(X: np.ndarray, y: np.ndarray, batch: int = 256, shuffle: bool = True):
     try:
         import tensorflow as tf  # type: ignore

@@ -15,13 +15,14 @@ from paddle.core.engine import EngineOptions, create_simulation
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
+from paddle.learn.data import load_latent_pca, project_pca
 from paddle.policy import (
     gaussian_confidence,
     freeze_bias_update,
     propose_boost_params,
     uncertainty_scale,
 )
-from paddle.validate.metrics import detect_change_point, gaussianity_report
+from paddle.validate.metrics import aggregate_gaussianity, detect_change_point, gaussianity_report
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
@@ -163,12 +164,17 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
     vmin_p = float("inf"); vmax_p = float("-inf")
     dihedral_samples: list[float] = []
     total_samples: list[float] = []
+    temperature_samples: list[float] = []
     for _ in range(n):
         sim.step(interval)
         Ed = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-        Ep = sim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        state_total = sim.context.getState(getEnergy=True, getVelocities=True)
+        Ep = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         dihedral_samples.append(Ed)
         total_samples.append(Ep)
+        temp = _compute_temperature_k(state_total, sim)
+        if temp is not None:
+            temperature_samples.append(float(temp))
         if Ed < vmin_d: vmin_d = Ed
         if Ed > vmax_d: vmax_d = Ed
         if Ep < vmin_p: vmin_p = Ep
@@ -179,7 +185,21 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
         vmin_d -= pad_d; vmax_d += pad_d
     if vmax_p - vmin_p < 1e-6:
         vmin_p -= pad_p; vmax_p += pad_p
-    return vmin_d, vmax_d, vmin_p, vmax_p, dihedral_samples, total_samples
+    return vmin_d, vmax_d, vmin_p, vmax_p, dihedral_samples, total_samples, temperature_samples
+
+def _load_latent_pca_if_any(outdir: Path) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    candidates = [
+        outdir / "models" / "run1" / "latent_pca.json",
+        outdir / "latent_pca.json",
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                return load_latent_pca(path)
+            except Exception as exc:
+                print(f"Warning: failed to load latent PCA from {path}: {exc}")
+                return None
+    return None
 
 def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
     return EngineOptions(
@@ -201,12 +221,13 @@ def _run_equil_cycle(
     last_restart: Optional[RestartRecord],
     metrics: dict[str, object],
     history_etot_mean: list[float],
+    latent_pca: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     model_summary: Optional[dict[str, object]] = None,
 ) -> RestartRecord:
     equil_dir = outdir / "equil"
     ensure_dir(equil_dir)
 
-    VminD, VmaxD, VminP, VmaxP, dihedral_samples, total_samples = _estimate_bounds(
+    VminD, VmaxD, VminP, VmaxP, dihedral_samples, total_samples, temperature_samples = _estimate_bounds(
         sim, steps=min(10000, cfg.ntebpercyc // 10), interval=max(10, cfg.ebRestartFreq)
     )
     etot_mean = float(np.mean(total_samples)) if total_samples else 0.0
@@ -235,6 +256,35 @@ def _run_equil_cycle(
     gaussianity["skew"] = gaussianity["skewness"]
     gaussianity["kurtosis"] = gaussianity["excess_kurtosis"]
     metrics.update(gaussianity)
+
+    latent_metrics: Optional[dict[str, float]] = None
+    if latent_pca is not None:
+        mean, components = latent_pca
+        min_len = min(len(total_samples), len(dihedral_samples), len(temperature_samples))
+        if min_len > 0:
+            X_cycle = np.column_stack([
+                np.asarray(total_samples[:min_len], dtype=float),
+                np.asarray(dihedral_samples[:min_len], dtype=float),
+                np.asarray(temperature_samples[:min_len], dtype=float),
+            ])
+            Z = project_pca(X_cycle, mean, components)
+            reports = [gaussianity_report(Z[:, i]) for i in range(Z.shape[1])]
+            agg = aggregate_gaussianity(reports)
+            latent_conf = gaussian_confidence(
+                cfg,
+                {
+                    "skew": agg["skewness"],
+                    "kurtosis": agg["excess_kurtosis"],
+                    "tail_risk": agg["tail_risk"],
+                },
+            )
+            latent_metrics = {
+                "latent_skewness": float(agg["skewness"]),
+                "latent_excess_kurtosis": float(agg["excess_kurtosis"]),
+                "latent_tail_risk": float(agg["tail_risk"]),
+                "latent_gaussian_confidence": float(latent_conf),
+            }
+            metrics.update(latent_metrics)
     history_etot_mean.append(etot_mean)
     cp = detect_change_point(
         np.array(history_etot_mean, dtype=float),
@@ -285,6 +335,13 @@ def _run_equil_cycle(
         },
         "controller": controller,
     }
+    if latent_metrics is not None:
+        bias_plan["metrics"]["latent"] = {
+            "skewness": latent_metrics["latent_skewness"],
+            "excess_kurtosis": latent_metrics["latent_excess_kurtosis"],
+            "tail_risk": latent_metrics["latent_tail_risk"],
+            "gaussian_confidence": latent_metrics["latent_gaussian_confidence"],
+        }
     if model_summary is not None:
         bias_plan["model_summary"] = model_summary
     write_json(bias_plan, outdir / f"bias_plan_cycle_{cyc}.json")
@@ -406,6 +463,7 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     rec: Optional[RestartRecord] = None
     metrics: dict[str, object] = {}
     model_summary = _load_model_summary(outdir)
+    latent_pca = _load_latent_pca_if_any(outdir)
     history_etot_mean: list[float] = []
     for cyc in range(int(cfg.ncycebstart), int(cfg.ncycebend)):
         rec = _run_equil_cycle(
@@ -416,6 +474,7 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
             rec,
             metrics,
             history_etot_mean,
+            latent_pca=latent_pca,
             model_summary=model_summary,
         )
 

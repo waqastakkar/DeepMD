@@ -163,6 +163,41 @@ def train_ensemble(npz: str | Path, splits: str | Path, out_dir: str | Path, cfg
         (ckpt / "history.json").write_text(json.dumps(hist.history, indent=2), encoding="utf-8")
         results["members"].append({"path": str(ckpt)})
 
+    latent_model_summary = None
+    try:
+        train_slice = slice(*sp["train"])
+        X_train = X[train_slice]
+        if X_train.ndim == 3:
+            X_train = X_train.reshape(-1, X_train.shape[-1])
+        if X_train.ndim != 2:
+            raise ValueError(f"Unexpected X_train shape for PCA: {X_train.shape}")
+        if X_train.shape[0] < 2:
+            raise ValueError("Not enough samples to fit PCA.")
+        mean = np.mean(X_train, axis=0)
+        X_centered = X_train - mean
+        _, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
+        k_latent = int(getattr(cfg, "latent_pca_k", 3))
+        k_latent = max(1, min(k_latent, Vt.shape[0]))
+        components = Vt[:k_latent, :]
+        if X_train.shape[0] > 1:
+            var = (S ** 2) / (X_train.shape[0] - 1)
+            total_var = float(np.sum(var))
+            if total_var > 0:
+                explained_ratio = (var[:k_latent] / total_var).tolist()
+            else:
+                explained_ratio = [0.0] * k_latent
+        else:
+            explained_ratio = [0.0] * k_latent
+        pca_payload = {
+            "mean": mean.astype(float).tolist(),
+            "components": components.astype(float).tolist(),
+            "explained_variance_ratio": explained_ratio,
+        }
+        (out / "latent_pca.json").write_text(json.dumps(pca_payload, indent=2), encoding="utf-8")
+        latent_model_summary = {"type": "pca", "k": k_latent, "path": "latent_pca.json"}
+    except Exception as exc:
+        print(f"Warning: latent PCA fit failed; skipping. Error: {exc}")
+
     mu_te, sig_te = ensemble_predict(out, X[a:b], batch=cfg.batch)
     y_te = y[a:b]
     metrics = compute_metrics(y_te, mu_te, sig_te)
@@ -184,7 +219,7 @@ def train_ensemble(npz: str | Path, splits: str | Path, out_dir: str | Path, cfg
             f"Error: {exc}"
         )
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    export_model_summary(out, metrics)
+    export_model_summary(out, metrics, latent_model=latent_model_summary)
 
     meta = {"train_config": asdict(cfg), **results, "metrics": metrics}
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -294,7 +329,11 @@ def conformal_diagnostics(
     }
 
 
-def export_model_summary(outdir: str | Path, metrics_dict: Mapping[str, object]) -> Dict[str, object]:
+def export_model_summary(
+    outdir: str | Path,
+    metrics_dict: Mapping[str, object],
+    latent_model: Optional[Mapping[str, object]] = None,
+) -> Dict[str, object]:
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -332,6 +371,9 @@ def export_model_summary(outdir: str | Path, metrics_dict: Mapping[str, object])
     for key in conformal_fields:
         if key in metrics_dict and metrics_dict[key] is not None:
             summary[key] = float(metrics_dict[key])
+
+    if latent_model is not None:
+        summary["latent_model"] = dict(latent_model)
 
     (out / "model_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
