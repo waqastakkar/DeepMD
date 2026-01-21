@@ -34,11 +34,17 @@ def run_cmd(cfg: SimulationConfig) -> None:
 
     dcd_path = Path(cfg.outdir) / "cmd.dcd"
     log_path = Path(cfg.outdir) / "cmd-state.log"
+    md_log_path = Path(cfg.outdir) / "md.log"
     rst_path = Path(cfg.outdir) / "cmd.rst"
 
     sim.reporters.append(DCDReporter(str(dcd_path), cfg.cmdRestartFreq))
     sim.reporters.append(StateDataReporter(
         file=str(log_path), reportInterval=cfg.cmdRestartFreq,
+        step=True, time=True, potentialEnergy=True, kineticEnergy=True, totalEnergy=True,
+        temperature=True, volume=False, density=True, speed=True, separator="\t",
+    ))
+    sim.reporters.append(StateDataReporter(
+        file=str(md_log_path), reportInterval=cfg.cmdRestartFreq,
         step=True, time=True, potentialEnergy=True, kineticEnergy=True, totalEnergy=True,
         temperature=True, volume=False, density=True, speed=True, separator="\t",
     ))

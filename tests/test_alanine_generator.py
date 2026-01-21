@@ -47,6 +47,23 @@ def test_generate_alanine_writes_inputs_and_runs_tleap(tmp_path, monkeypatch):
     assert calls[0][1] == implicit_dir
     assert calls[1][1] == explicit_dir
 
+    def read_config(path: Path) -> dict[str, str]:
+        data: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            key, value = line.split(":", 1)
+            data[key.strip()] = value.strip()
+        return data
+
+    implicit_cfg = read_config(implicit_dir / "config.yml")
+    explicit_cfg = read_config(explicit_dir / "config.yml")
+
+    assert implicit_cfg["parmFile"] == str((implicit_dir / "complex.parm7").resolve())
+    assert implicit_cfg["crdFile"] == str((implicit_dir / "complex.rst7").resolve())
+    assert explicit_cfg["parmFile"] == str((explicit_dir / "complex.parm7").resolve())
+    assert explicit_cfg["crdFile"] == str((explicit_dir / "complex.rst7").resolve())
+
 
 def test_assert_tleap_available_errors_when_missing(monkeypatch):
     monkeypatch.delenv("AMBERHOME", raising=False)
