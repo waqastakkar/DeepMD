@@ -49,6 +49,18 @@ def _exists_if_set(path: Path, name: str) -> None:
         raise FileNotFoundError(f"{name} not found: {path}")
 
 
+def _resolve_config_paths(data: Dict[str, Any], base_dir: Path) -> Dict[str, Any]:
+    resolved = dict(data)
+    for key in ("parmFile", "crdFile", "outdir"):
+        value = resolved.get(key)
+        if not value:
+            continue
+        path = Path(str(value))
+        if not path.is_absolute():
+            resolved[key] = str(base_dir / path)
+    return resolved
+
+
 def set_global_seed(seed: int) -> None:
     random.seed(seed)
     try:
@@ -197,6 +209,7 @@ class SimulationConfig:
         if not p.exists():
             raise FileNotFoundError(f"Config file not found: {p}")
         data = SimulationConfig._load_file(p)
+        data = _resolve_config_paths(data, p.parent)
         return SimulationConfig.from_dict(data)
 
 
