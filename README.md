@@ -37,6 +37,19 @@ The CLI exposes multiple subcommands. The examples below assume the CLI entrypoi
 python -m paddle.cli cmd --config config.yaml --out out_cmd
 ```
 
+### Generate example YAML configs
+
+Use the CLI to generate the explicit/implicit 5 ns CUDA example configs in one step:
+
+```bash
+python -m paddle.cli make_configs --out configs
+```
+
+This will write:
+
+- `configs/config-explicit-5ns.yaml`
+- `configs/config-implicit-5ns.yaml`
+
 ### 5 ns CUDA test runs (explicit + implicit)
 
 The CMD stage uses a 2 fs timestep (`dt_ps=0.002`), so **5 ns = 2,500,000 steps**. For a CUDA-backed OpenMM run, set the platform and CUDA parameters in your config, then run the CLI twice (explicit + implicit). Example configs:
