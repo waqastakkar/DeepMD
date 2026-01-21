@@ -19,6 +19,7 @@ This creates two benchmark folders:
 
 Each folder includes `complex.parm7`, `complex.rst7`, `tleap.in`, `tleap.log`, and a
 pipeline-ready `config.yml` that enforces CUDA usage.
+The generated configs also pin a 5 ns production protocol (2 fs timestep, 2.5M steps).
 
 ### Run the pipeline
 
