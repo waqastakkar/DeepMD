@@ -254,7 +254,15 @@ def ensemble_predict(model_dir: str | Path, X: np.ndarray, batch: int = 512):
     members = load_members(Path(model_dir))
     preds = []
     for m in members:
-        y = m.predict(X, batch_size=batch, verbose=0)
+        n = X.shape[0]
+        pad = (-n) % batch
+        if pad:
+            # Fixed TensorFlow retracing by enforcing stable prediction signature.
+            pad_shape = (pad, *X.shape[1:])
+            X_batch = np.concatenate([X, np.zeros(pad_shape, dtype=X.dtype)], axis=0)
+        else:
+            X_batch = X
+        y = m.predict(X_batch, batch_size=batch, verbose=0)[:n]
         D = y.shape[1] // 2
         mu = y[:, :D]
         sigma = y[:, D:]
