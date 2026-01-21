@@ -18,6 +18,21 @@ Minimal pipeline invocation (uses the CLI entry point):
 python -m paddle.cli pipeline --config config.yaml --out outdir
 ```
 
+Generate example configuration YAMLs (writes explicit/implicit configs):
+
+```bash
+python -m paddle.cli make_configs --out configs
+```
+
+Example config files produced:
+
+- `configs/config-explicit-5ns.yaml`
+- `configs/config-implicit-5ns.yaml`
+
+Create a working config by copying one of the generated files (for example,
+`configs/config-explicit-5ns.yaml`) to `config.yml` and editing paths, GPU settings,
+and run lengths as needed before invoking the pipeline.
+
 ### CLI commands
 
 - `bench_alanine` — Generate alanine dipeptide benchmarks with tleap
@@ -28,6 +43,51 @@ python -m paddle.cli pipeline --config config.yaml --out outdir
 - `pipeline` — Run full pipeline
 - `prep` — Run equilibration-prep stage
 - `train` — Train ensemble model
+
+### Helpful CLI examples
+
+Run just the CMD stage:
+
+```bash
+python -m paddle.cli cmd --config config.yml --out out_cmd
+```
+
+Run equilibration-prep and then build a training dataset:
+
+```bash
+python -m paddle.cli prep --config config.yml --out out_prep
+python -m paddle.cli data --prep out_prep/prep --out out_data
+```
+
+Train an ensemble model from a prepared dataset:
+
+```bash
+python -m paddle.cli train --data out_data/windows.npz --splits out_data/splits.json --out out_models
+```
+
+Run equilibration + production only:
+
+```bash
+python -m paddle.cli equil_prod --config config.yml --out out_prod
+```
+
+Generate alanine dipeptide benchmarks:
+
+```bash
+python -m paddle.cli bench_alanine --out benchmarks/alanine
+```
+
+### Ablation comparison (not part of the pipeline)
+
+The ablation plot is generated from the bias-plan logs after you complete two
+pipeline runs (a controlled run and a baseline run). Run the plot script directly:
+
+```bash
+python scripts/plot_ablation_comparison.py \
+  --controlled out_controlled \
+  --baseline out_baseline \
+  --out ablation_comparison.svg
+```
 
 ## Pipeline stages
 
