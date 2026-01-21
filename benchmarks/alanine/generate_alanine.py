@@ -28,6 +28,9 @@ EXPLICIT_TLEAP = (
     "quit\n"
 )
 
+FIVE_NS_STEPS = 2_500_000
+PROD_REPORT_INTERVAL = 5_000
+
 
 def _assert_tleap_available() -> None:
     amberhome = os.environ.get("AMBERHOME")
@@ -76,6 +79,11 @@ def _write_config(folder: Path, sim_type: str) -> Path:
             "cuda_device_index: 0",
             "cuda_precision: mixed",
             "precision: mixed",
+            "dt: 0.002",
+            "ncycprodstart: 0",
+            "ncycprodend: 1",
+            f"ntprodpercyc: {FIVE_NS_STEPS}",
+            f"prodRestartFreq: {PROD_REPORT_INTERVAL}",
             "",
         ]
     )
