@@ -42,6 +42,11 @@ END
     if solvent_mode not in {"explicit", "implicit"}:
         raise ValueError("Solvent mode must be 'explicit' or 'implicit'.")
 
+    def _vector_length(vec):
+        if hasattr(vec, "length"):
+            return vec.length()
+        return vec.norm()
+
     if solvent_mode == "explicit":
         forcefield = ForceField("amber14-all.xml", "amber14/tip3p.xml")
     else:
@@ -59,7 +64,7 @@ END
         box_vectors = modeller.topology.getPeriodicBoxVectors()
         if box_vectors is None:
             raise RuntimeError("Explicit solvent requested but no periodic box vectors set.")
-        min_box_length = min(vec.length() for vec in box_vectors)
+        min_box_length = min(_vector_length(vec) for vec in box_vectors)
         max_cutoff = 0.5 * min_box_length - 0.05 * unit.nanometer
         min_cutoff = 0.1 * unit.nanometer
         nonbonded_cutoff = min(1.0 * unit.nanometer, max(min_cutoff, max_cutoff))
