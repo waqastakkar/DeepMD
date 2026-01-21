@@ -120,3 +120,51 @@ def exploration_score(val: float, v_good: float, v_high: float) -> float:
     if val >= v_high:
         return 1.0
     return float((val - v_good) / (v_high - v_good))
+
+def reweighting_diagnostics(deltaV: np.ndarray, beta: float = 1.0) -> dict[str, float]:
+    """
+    Compute diagnostics for weights w = exp(beta * deltaV).
+
+    Stabilize with shift = max(beta * deltaV) before exponentiation.
+    """
+    x = np.asarray(deltaV, dtype=np.float64).ravel()
+    n = int(x.size)
+    if n < 2:
+        return {
+            "n": float(n),
+            "ess": 0.0,
+            "ess_frac": 0.0,
+            "entropy": 0.0,
+            "entropy_norm": 0.0,
+            "w_cv": 0.0,
+        }
+    scaled = float(beta) * x
+    shift = float(np.max(scaled))
+    weights = np.exp(scaled - shift)
+    w_sum = float(np.sum(weights))
+    w_sq_sum = float(np.sum(weights * weights))
+    if w_sum <= 0.0 or w_sq_sum <= 0.0:
+        return {
+            "n": float(n),
+            "ess": 0.0,
+            "ess_frac": 0.0,
+            "entropy": 0.0,
+            "entropy_norm": 0.0,
+            "w_cv": 0.0,
+        }
+    ess = (w_sum * w_sum) / w_sq_sum
+    p = weights / w_sum
+    entropy = float(-np.sum(p * np.log(p)))
+    entropy_norm = entropy / float(np.log(n))
+    entropy_norm = float(np.clip(entropy_norm, 0.0, 1.0))
+    w_mean = float(np.mean(weights))
+    w_std = float(np.std(weights))
+    w_cv = w_std / w_mean if w_mean > 0.0 else 0.0
+    return {
+        "n": float(n),
+        "ess": float(ess),
+        "ess_frac": float(ess) / float(n),
+        "entropy": float(entropy),
+        "entropy_norm": float(entropy_norm),
+        "w_cv": float(w_cv),
+    }

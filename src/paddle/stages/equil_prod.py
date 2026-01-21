@@ -29,7 +29,10 @@ from paddle.validate.metrics import (
     exploration_proxy,
     exploration_score,
     gaussianity_report,
+    reweighting_diagnostics,
 )
+
+_KB_KJ_MOL_K = 0.008314462618
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
@@ -90,6 +93,42 @@ def _compute_temperature_k(state, sim) -> Optional[float]:
         return float(temperature.value_in_unit(unit.kelvin))
     except Exception:
         return None
+
+def _resolve_reweight_beta(
+    cfg: SimulationConfig,
+    temperature_samples: list[float],
+) -> tuple[float, str]:
+    if temperature_samples:
+        t_mean = float(np.mean(temperature_samples))
+        if t_mean > 0.0:
+            return 1.0 / (_KB_KJ_MOL_K * t_mean), "temperature"
+    beta_cfg = getattr(cfg, "reweight_beta", None)
+    if beta_cfg is not None:
+        return float(beta_cfg), "config"
+    return 1.0, "unit"
+
+def _make_reweight_sampler(sim, integ, deltaV_samples: list[float], temperature_samples: list[float]):
+    state = {"enabled": True, "available": True}
+    def sample() -> None:
+        if not state["enabled"]:
+            return
+        try:
+            dboost = float(integ.getGlobalVariableByName("DihedralBoostPotential"))
+            tboost = float(integ.getGlobalVariableByName("TotalBoostPotential"))
+        except Exception:
+            print("Warning: reweight diagnostics skipped (boost potentials unavailable).")
+            state["enabled"] = False
+            state["available"] = False
+            return
+        deltaV_samples.append(dboost + tboost)
+        try:
+            st = sim.context.getState(getEnergy=True, getVelocities=True)
+            temp = _compute_temperature_k(st, sim)
+        except Exception:
+            temp = None
+        if temp is not None:
+            temperature_samples.append(float(temp))
+    return sample, state
 
 
 def _check_state_finite(sim, label: str, outdir: Path) -> None:
@@ -190,13 +229,22 @@ def _adaptive_stop_status(
     }
 
 
-def _step_with_checks(sim, total_steps: int, block_size: int, label_prefix: str, outdir: Path) -> None:
+def _step_with_checks(
+    sim,
+    total_steps: int,
+    block_size: int,
+    label_prefix: str,
+    outdir: Path,
+    sample_fn=None,
+) -> None:
     remaining = int(total_steps)
     block = max(1, int(block_size))
     block_index = 0
     while remaining > 0:
         step_now = min(block, remaining)
         sim.step(step_now)
+        if sample_fn is not None:
+            sample_fn()
         _check_state_finite(sim, f"{label_prefix}_block{block_index:04d}", outdir)
         remaining -= step_now
         block_index += 1
@@ -471,7 +519,6 @@ def _run_equil_cycle(
         }
     if model_summary is not None:
         bias_plan["model_summary"] = model_summary
-    write_json(bias_plan, outdir / f"bias_plan_cycle_{cyc}.json")
 
     integ = make_dual_equil(dt_ps=_resolve_dt_ps(cfg), temperature_K=cfg.temperature, params=params)
 
@@ -488,7 +535,27 @@ def _run_equil_cycle(
         temperature=True, density=True, speed=True, separator="\t",
     ))
 
-    _step_with_checks(sim, cfg.ntebpercyc, cfg.ebRestartFreq, f"equil_cycle{cyc:02d}", outdir)
+    reweight_enabled = bool(getattr(cfg, "reweight_diag_enabled", True))
+    deltaV_samples: list[float] = []
+    reweight_temperature_samples: list[float] = []
+    sample_fn = None
+    sample_state = None
+    if reweight_enabled:
+        sample_fn, sample_state = _make_reweight_sampler(
+            sim,
+            integ,
+            deltaV_samples,
+            reweight_temperature_samples,
+        )
+
+    _step_with_checks(
+        sim,
+        cfg.ntebpercyc,
+        cfg.ebRestartFreq,
+        f"equil_cycle{cyc:02d}",
+        outdir,
+        sample_fn=sample_fn,
+    )
 
     VminD_f = float(integ.getGlobalVariableByName("VminD"))
     VmaxD_f = float(integ.getGlobalVariableByName("VmaxD"))
@@ -506,6 +573,24 @@ def _run_equil_cycle(
         VminD_kJ=VminD_f, VmaxD_kJ=VmaxD_f, DihedralRef_kJ=Dref_f, DihedralBoost_kJ=Dboost_f, k0D=k0D_f,
         VminP_kJ=VminP_f, VmaxP_kJ=VmaxP_f, TotalRef_kJ=Tref_f, TotalBoost_kJ=Tboost_f, k0P=k0P_f,
     )
+    if reweight_enabled:
+        if sample_state is not None and not sample_state.get("available", True):
+            pass
+        elif len(deltaV_samples) < 2:
+            print("Warning: reweight diagnostics skipped (no deltaV samples).")
+        else:
+            beta, beta_source = _resolve_reweight_beta(cfg, reweight_temperature_samples)
+            reweight = reweighting_diagnostics(np.asarray(deltaV_samples, dtype=float), beta=beta)
+            reweight["beta"] = float(beta)
+            reweight["beta_source"] = beta_source
+            metrics["reweight"] = reweight
+            ess_min = float(getattr(cfg, "reweight_ess_min", 0.1))
+            entropy_min = float(getattr(cfg, "reweight_entropy_min", 0.7))
+            reweight_ok = bool(reweight["ess_frac"] >= ess_min and reweight["entropy_norm"] >= entropy_min)
+            metrics["reweight_ok"] = reweight_ok
+            bias_plan["metrics"]["reweight"] = reweight
+            bias_plan["metrics"]["reweight_ok"] = reweight_ok
+    write_json(bias_plan, outdir / f"bias_plan_cycle_{cyc}.json")
     write_restart(outdir / "gamd-restart.dat", rec)
     append_metrics({
         "phase": "equil","cycle": cyc,
@@ -537,7 +622,27 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
         temperature=True, density=True, speed=True, separator="\t",
     ))
 
-    _step_with_checks(sim, cfg.ntprodpercyc, cfg.prodRestartFreq, f"prod_cycle{cyc:02d}", outdir)
+    reweight_enabled = bool(getattr(cfg, "reweight_diag_enabled", True))
+    deltaV_samples: list[float] = []
+    reweight_temperature_samples: list[float] = []
+    sample_fn = None
+    sample_state = None
+    if reweight_enabled:
+        sample_fn, sample_state = _make_reweight_sampler(
+            sim,
+            integ,
+            deltaV_samples,
+            reweight_temperature_samples,
+        )
+
+    _step_with_checks(
+        sim,
+        cfg.ntprodpercyc,
+        cfg.prodRestartFreq,
+        f"prod_cycle{cyc:02d}",
+        outdir,
+        sample_fn=sample_fn,
+    )
 
     VminD_f = float(integ.getGlobalVariableByName("VminD"))
     VmaxD_f = float(integ.getGlobalVariableByName("VmaxD"))
@@ -556,7 +661,23 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
         VminP_kJ=VminP_f, VmaxP_kJ=VmaxP_f, TotalRef_kJ=Tref_f, TotalBoost_kJ=Tboost_f, k0P=k0P_f,
     )
     write_restart(outdir / "gamd-restart.dat", rec2)
-    append_metrics({"phase": "prod","cycle": cyc,"k0D": k0D_f,"k0P": k0P_f}, outdir)
+    prod_metrics = {"phase": "prod","cycle": cyc,"k0D": k0D_f,"k0P": k0P_f}
+    if reweight_enabled:
+        if sample_state is not None and not sample_state.get("available", True):
+            pass
+        elif len(deltaV_samples) < 2:
+            print("Warning: reweight diagnostics skipped (no deltaV samples).")
+        else:
+            beta, beta_source = _resolve_reweight_beta(cfg, reweight_temperature_samples)
+            reweight = reweighting_diagnostics(np.asarray(deltaV_samples, dtype=float), beta=beta)
+            reweight["beta"] = float(beta)
+            reweight["beta_source"] = beta_source
+            ess_min = float(getattr(cfg, "reweight_ess_min", 0.1))
+            entropy_min = float(getattr(cfg, "reweight_entropy_min", 0.7))
+            reweight_ok = bool(reweight["ess_frac"] >= ess_min and reweight["entropy_norm"] >= entropy_min)
+            prod_metrics["reweight"] = reweight
+            prod_metrics["reweight_ok"] = reweight_ok
+    append_metrics(prod_metrics, outdir)
     return rec2
 
 def run_equil_and_prod(cfg: SimulationConfig) -> None:
