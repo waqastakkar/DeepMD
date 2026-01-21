@@ -72,7 +72,7 @@ def read_prep_logs(prep_dir: str | Path) -> pd.DataFrame:
 def _compute_stats(arr: np.ndarray, axis: int = 0) -> Dict[str, np.ndarray]:
     mean = arr.mean(axis=axis)
     std = arr.std(axis=axis)
-    std[std == 0] = 1.0
+    std = np.where(std < 1e-12, 1.0, std)
     minv = arr.min(axis=axis)
     maxv = arr.max(axis=axis)
     return {"mean": mean, "std": std, "min": minv, "max": maxv}
@@ -99,12 +99,17 @@ def make_windows(
 ):
     F = df[feature_cols].to_numpy(dtype=np.float32)
     Ysrc = df[target_cols].to_numpy(dtype=np.float32)
+    raw_std = F.std(axis=0)
+    const_features = np.where(raw_std < 1e-12)[0].tolist()
     stats_arr = _compute_stats(F, axis=0)
+    if const_features:
+        print(f"Warning: constant feature columns detected at indices {const_features}")
     stats = {
         "features": {k: stats_arr[k].astype(float).tolist() for k in stats_arr},
         "mode": {"norm": norm},
         "feature_cols": {"names": list(feature_cols)},
         "target_cols": {"names": list(target_cols)},
+        "constant_features": const_features,
     }
     F_norm = _apply_norm(F, stats_arr, norm)
 
