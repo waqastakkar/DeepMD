@@ -55,3 +55,4 @@ python benchmarks/alanine/run_benchmark.py \
 - The benchmark is deterministic for a fixed seed.
 - The runtime report includes the elapsed time and steps/second to help compare
   runs across hardware.
+- To run GPU smoke tests locally, use `RUN_GPU_TESTS=1 pytest -q -m gpu`.
