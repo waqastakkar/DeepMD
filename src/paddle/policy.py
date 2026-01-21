@@ -14,6 +14,10 @@ _UNCERTAINTY_LOW = 0.2
 _K0_DOWN_FACTOR = 0.8
 _K0_UP_STEP = 0.05
 _MIN_SPAN = 1e-6
+_KURTOSIS_FREEZE = 2.0
+_SKEW_FREEZE = 0.6
+_TAIL_RISK_GOOD = 0.01
+_TAIL_RISK_FREEZE = 0.05
 
 
 def _get_value(source: object, key: str) -> Optional[float]:
@@ -56,6 +60,68 @@ def _uncertainty_is_low(model_summary: Optional[Mapping[str, object]]) -> bool:
     if value is None:
         return False
     return abs(value) <= _UNCERTAINTY_LOW
+
+
+def gaussian_confidence(cfg, metrics: Mapping[str, object]) -> float:
+    """Return a conservative Gaussianity confidence in [0, 1]."""
+    skew_good = float(getattr(cfg, "gaussian_skew_good", _SKEW_GOOD))
+    skew_freeze = float(getattr(cfg, "gaussian_skew_freeze", _SKEW_FREEZE))
+    kurtosis_good = float(getattr(cfg, "gaussian_excess_kurtosis_good", _KURTOSIS_GOOD))
+    kurtosis_freeze = float(getattr(cfg, "gaussian_excess_kurtosis_freeze", _KURTOSIS_FREEZE))
+    tail_good = float(getattr(cfg, "gaussian_tail_risk_good", _TAIL_RISK_GOOD))
+    tail_freeze = float(getattr(cfg, "gaussian_tail_risk_freeze", _TAIL_RISK_FREEZE))
+
+    def _linear_confidence(value: Optional[float], good: float, freeze: float) -> float:
+        if value is None:
+            return 0.0
+        span = freeze - good
+        if span <= 0:
+            return 0.0 if abs(value) >= freeze else 1.0
+        if abs(value) <= good:
+            return 1.0
+        if abs(value) >= freeze:
+            return 0.0
+        return (freeze - abs(value)) / span
+
+    skew = _metric(metrics, "skew", "skewness", "skew_proxy", "skewness_proxy")
+    kurtosis = _metric(metrics, "kurtosis", "excess_kurtosis", "kurtosis_proxy", "excess_kurtosis_proxy")
+    tail = _metric(metrics, "tail_risk", "tail_risk_proxy")
+
+    conf_skew = _linear_confidence(skew, skew_good, skew_freeze)
+    conf_kurt = _linear_confidence(kurtosis, kurtosis_good, kurtosis_freeze)
+    conf_tail = _linear_confidence(tail, tail_good, tail_freeze)
+    return min(conf_skew, conf_kurt, conf_tail)
+
+
+def freeze_bias_update(cfg, metrics: Mapping[str, object]) -> bool:
+    """Decide whether to freeze bias updates based on Gaussianity."""
+    skew_freeze = float(getattr(cfg, "gaussian_skew_freeze", _SKEW_FREEZE))
+    kurtosis_freeze = float(getattr(cfg, "gaussian_excess_kurtosis_freeze", _KURTOSIS_FREEZE))
+    tail_freeze = float(getattr(cfg, "gaussian_tail_risk_freeze", _TAIL_RISK_FREEZE))
+
+    skew = _metric(metrics, "skew", "skewness", "skew_proxy", "skewness_proxy")
+    kurtosis = _metric(metrics, "kurtosis", "excess_kurtosis", "kurtosis_proxy", "excess_kurtosis_proxy")
+    tail = _metric(metrics, "tail_risk", "tail_risk_proxy")
+    if skew is None or kurtosis is None or tail is None:
+        return True
+    return (
+        abs(skew) >= skew_freeze
+        or abs(kurtosis) >= kurtosis_freeze
+        or abs(tail) >= tail_freeze
+    )
+
+
+def uncertainty_scale(cfg, model_summary: Optional[Mapping[str, object]]) -> float:
+    """Return uncertainty-aware damping scale in [0, 1]."""
+    if model_summary is None:
+        return 1.0
+    uncertainty = _metric(model_summary, "uncertainty", "sigma", "std", "variance")
+    if uncertainty is None:
+        return 1.0
+    ref = float(getattr(cfg, "uncertainty_ref", _UNCERTAINTY_LOW))
+    power = float(getattr(cfg, "uncertainty_damp_power", 1.0))
+    scale = (ref / max(abs(uncertainty), 1e-12)) ** power
+    return _clamp(scale, 0.0, 1.0)
 
 
 def _adjust_k0(
@@ -125,7 +191,7 @@ def propose_boost_params(
     vmin_d, vmax_d = _sanitize_bounds(vmin_d, vmax_d)
     vmin_p, vmax_p = _sanitize_bounds(vmin_p, vmax_p)
 
-    k0D = _adjust_k0(
+    k0D_prop = _adjust_k0(
         k0D_base,
         metrics,
         model_summary,
@@ -133,7 +199,7 @@ def propose_boost_params(
         kurtosis_good=kurtosis_good,
         skew_good=skew_good,
     )
-    k0P = _adjust_k0(
+    k0P_prop = _adjust_k0(
         k0P_base,
         metrics,
         model_summary,
@@ -141,6 +207,20 @@ def propose_boost_params(
         kurtosis_good=kurtosis_good,
         skew_good=skew_good,
     )
+    prev_k0D = k0D_base
+    prev_k0P = k0P_base
+    if freeze_bias_update(cfg, metrics):
+        # Formal stability criterion: freeze if Gaussianity is out of bounds.
+        k0D = prev_k0D
+        k0P = prev_k0P
+    else:
+        # Uncertainty-aware damping between previous and proposed values.
+        conf = gaussian_confidence(cfg, metrics)
+        alpha = _clamp(conf, float(cfg.policy_damp_min), float(cfg.policy_damp_max))
+        alpha *= uncertainty_scale(cfg, model_summary)
+        alpha = _clamp(alpha, 0.0, 1.0)
+        k0D = prev_k0D + alpha * (k0D_prop - prev_k0D)
+        k0P = prev_k0P + alpha * (k0P_prop - prev_k0P)
 
     k0D = _clamp(k0D, k0_min, k0_max)
     k0P = _clamp(k0P, k0_min, k0_max)
