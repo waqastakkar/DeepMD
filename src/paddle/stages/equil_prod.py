@@ -231,6 +231,7 @@ def _run_equil_cycle(
         "gaussian_confidence": float(gaussian_confidence(cfg, metrics)),
         "freeze_bias_update": bool(freeze_bias_update(cfg, metrics)),
         "uncertainty_scale": float(uncertainty_scale(cfg, model_summary)),
+        "controller_enabled": bool(getattr(cfg, "controller_enabled", True)),
     }
     params = propose_boost_params(
         cfg,
