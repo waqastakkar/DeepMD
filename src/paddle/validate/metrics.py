@@ -35,3 +35,41 @@ def write_report_json(path: str | Path, **metrics) -> Path:
     p = Path(path); p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     return p
+
+def detect_change_point(
+    values: np.ndarray,
+    window: int = 5,
+    z_threshold: float = 3.0,
+) -> dict[str, float | bool]:
+    """
+    Deterministic change-point detector using a windowed z-score on the last point.
+
+    Given a 1D series values of per-cycle scalars (e.g., Etot mean per cycle),
+    compute mean/std over the previous `window` points and compute z-score of the last point.
+    If |z| >= z_threshold, report change_point=True.
+    """
+    x = np.asarray(values, dtype=float).ravel()
+    window = int(window)
+    z_threshold = float(z_threshold)
+    if x.size < window + 1:
+        return {
+            "change_point": False,
+            "z_score": 0.0,
+            "mean_ref": 0.0,
+            "std_ref": 0.0,
+            "window": window,
+            "z_threshold": z_threshold,
+        }
+    ref = x[-(window + 1):-1]
+    mean_ref = float(np.mean(ref))
+    std_ref = float(np.std(ref))
+    std_ref = max(std_ref, 1e-12)
+    z_score = float((x[-1] - mean_ref) / std_ref)
+    return {
+        "change_point": abs(z_score) >= z_threshold,
+        "z_score": z_score,
+        "mean_ref": mean_ref,
+        "std_ref": std_ref,
+        "window": window,
+        "z_threshold": z_threshold,
+    }

@@ -21,7 +21,7 @@ from paddle.policy import (
     propose_boost_params,
     uncertainty_scale,
 )
-from paddle.validate.metrics import gaussianity_report
+from paddle.validate.metrics import detect_change_point, gaussianity_report
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
@@ -200,6 +200,7 @@ def _run_equil_cycle(
     outdir: Path,
     last_restart: Optional[RestartRecord],
     metrics: dict[str, object],
+    history_etot_mean: list[float],
     model_summary: Optional[dict[str, object]] = None,
 ) -> RestartRecord:
     equil_dir = outdir / "equil"
@@ -208,7 +209,14 @@ def _run_equil_cycle(
     VminD, VmaxD, VminP, VmaxP, dihedral_samples, total_samples = _estimate_bounds(
         sim, steps=min(10000, cfg.ntebpercyc // 10), interval=max(10, cfg.ebRestartFreq)
     )
-    cycle_stats = {"VminD": VminD, "VmaxD": VmaxD, "VminP": VminP, "VmaxP": VmaxP}
+    etot_mean = float(np.mean(total_samples)) if total_samples else 0.0
+    cycle_stats = {
+        "VminD": VminD,
+        "VmaxD": VmaxD,
+        "VminP": VminP,
+        "VmaxP": VmaxP,
+        "Etot_mean": etot_mean,
+    }
     dihedral_report = gaussianity_report(np.asarray(dihedral_samples, dtype=float))
     total_report = gaussianity_report(np.asarray(total_samples, dtype=float))
     gaussianity = {
@@ -227,11 +235,23 @@ def _run_equil_cycle(
     gaussianity["skew"] = gaussianity["skewness"]
     gaussianity["kurtosis"] = gaussianity["excess_kurtosis"]
     metrics.update(gaussianity)
+    history_etot_mean.append(etot_mean)
+    cp = detect_change_point(
+        np.array(history_etot_mean, dtype=float),
+        window=int(getattr(cfg, "change_point_window", 5)),
+        z_threshold=float(getattr(cfg, "change_point_z", 3.0)),
+    )
+    metrics["change_point"] = bool(cp["change_point"])
+    metrics["change_point_z"] = float(cp["z_score"])
     controller = {
         "gaussian_confidence": float(gaussian_confidence(cfg, metrics)),
         "freeze_bias_update": bool(freeze_bias_update(cfg, metrics)),
         "uncertainty_scale": float(uncertainty_scale(cfg, model_summary)),
         "controller_enabled": bool(getattr(cfg, "controller_enabled", True)),
+        "change_point": bool(cp["change_point"]),
+        "change_point_z": float(cp["z_score"]),
+        "change_point_window": int(cp["window"]),
+        "change_point_z_threshold": float(cp["z_threshold"]),
     }
     params = propose_boost_params(
         cfg,
@@ -386,8 +406,18 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     rec: Optional[RestartRecord] = None
     metrics: dict[str, object] = {}
     model_summary = _load_model_summary(outdir)
+    history_etot_mean: list[float] = []
     for cyc in range(int(cfg.ncycebstart), int(cfg.ncycebend)):
-        rec = _run_equil_cycle(cfg, cyc, sim, outdir, rec, metrics, model_summary=model_summary)
+        rec = _run_equil_cycle(
+            cfg,
+            cyc,
+            sim,
+            outdir,
+            rec,
+            metrics,
+            history_etot_mean,
+            model_summary=model_summary,
+        )
 
     if rec is None:
         restart_path = outdir / "gamd-restart.dat"

@@ -95,6 +95,8 @@ def gaussian_confidence(cfg, metrics: Mapping[str, object]) -> float:
 
 def freeze_bias_update(cfg, metrics: Mapping[str, object]) -> bool:
     """Decide whether to freeze bias updates based on Gaussianity."""
+    if bool(metrics.get("change_point", False)):
+        return True
     skew_freeze = float(getattr(cfg, "gaussian_skew_freeze", _SKEW_FREEZE))
     kurtosis_freeze = float(getattr(cfg, "gaussian_excess_kurtosis_freeze", _KURTOSIS_FREEZE))
     tail_freeze = float(getattr(cfg, "gaussian_tail_risk_freeze", _TAIL_RISK_FREEZE))
@@ -213,6 +215,10 @@ def propose_boost_params(
     else:
         prev_k0D = k0D_base
         prev_k0P = k0P_base
+        change_point = bool(metrics.get("change_point", False))
+        if change_point and bool(getattr(cfg, "reset_on_change_point", False)):
+            prev_k0D = base_k0
+            prev_k0P = base_k0
         if freeze_bias_update(cfg, metrics):
             # Formal stability criterion: freeze if Gaussianity is out of bounds.
             k0D = prev_k0D
