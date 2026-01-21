@@ -104,6 +104,15 @@ def cmd_pipeline(ns):
         print("[4/5] TRAIN skipped.")
     print("[5/5] EQUIL+PROD…"); run_equil_and_prod(cfg)
 
+
+def cmd_bench_alanine(ns):
+    from benchmarks.alanine.generate_alanine import generate_alanine
+
+    out_root = Path(ns.out)
+    locations = generate_alanine(out_root)
+    for label, path in locations.items():
+        print(f"{label}: {path}")
+
 def build_parser():
     ap = argparse.ArgumentParser(description="paddle CLI")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -135,6 +144,9 @@ def build_parser():
     p.add_argument("--hidden", default="256,256"); p.add_argument("--dropout", type=float, default=0.1); p.add_argument("--patience", type=int, default=8); p.add_argument("--seed", type=int, default=2025)
     p.add_argument("--skip-train", action="store_true")
     p.set_defaults(func=cmd_pipeline)
+    p = sub.add_parser("bench_alanine", help="Generate alanine dipeptide benchmarks with tleap")
+    p.add_argument("--out", default="benchmarks/alanine")
+    p.set_defaults(func=cmd_bench_alanine)
     return ap
 
 def main(argv=None) -> int:
