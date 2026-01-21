@@ -64,10 +64,12 @@ def _run_tleap(folder: Path) -> None:
 
 
 def _write_config(folder: Path, sim_type: str) -> Path:
+    parm_path = (folder / "complex.parm7").resolve()
+    crd_path = (folder / "complex.rst7").resolve()
     config_text = "\n".join(
         [
-            "parmFile: complex.parm7",
-            "crdFile: complex.rst7",
+            f"parmFile: {parm_path}",
+            f"crdFile: {crd_path}",
             f"simType: {sim_type}",
             "platform: CUDA",
             "require_gpu: true",

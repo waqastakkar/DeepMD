@@ -1,9 +1,9 @@
 # Reproducibility (Nature Methods supplementary software)
 
 This document describes how to reproduce the benchmark outputs used in the
-supplementary material for the DeepMD workflow. The included benchmark is a
-minimal, synthetic alanine-dipeptide-style series that generates a potential of
-mean force (PMF) and summary statistics.
+supplementary material for the DeepMD workflow. The benchmark uses a real
+ACE–ALA–NME alanine dipeptide system built with AmberTools `tleap` and runs the
+full pipeline on the resulting Amber `parm7`/`rst7` inputs.
 
 ## Environment
 
@@ -13,65 +13,43 @@ Use Python 3.10+ with the dependencies needed by the benchmark code:
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install numpy
+python -m pip install -r requirements.txt
 ```
 
 ## Reproducing the benchmark outputs
 
-The benchmark lives in `benchmarks/alanine`. The default configuration is
-`benchmarks/alanine/config.json` and includes the seed, mixture parameters, and
-number of steps used to generate the synthetic series.
+The benchmark lives in `benchmarks/alanine`. The `bench_alanine` generator
+creates both implicit and explicit systems plus pipeline-ready `config.yml`
+files that point at the generated `parm7`/`rst7` files.
 
-1. Run the benchmark script:
+1. Generate benchmark inputs with AmberTools `tleap`:
 
    ```bash
-   python benchmarks/alanine/run_benchmark.py \
-     --config benchmarks/alanine/config.json \
-     --outdir benchmarks/alanine/out
+   python cli.py bench_alanine --out benchmarks/alanine
    ```
 
-2. Verify that the outputs are created:
+2. Run the pipeline on the implicit solvent system:
 
-   - `benchmarks/alanine/out/pmf.json`
-   - `benchmarks/alanine/out/metrics.json`
-   - `benchmarks/alanine/out/runtime.json`
+   ```bash
+   python cli.py pipeline \
+     --config benchmarks/alanine/implicit/config.yml \
+     --out benchmarks/alanine/implicit/out
+   ```
 
-## Reproducing with custom parameters
+3. Repeat for explicit solvent if desired:
 
-You can override the number of steps, bin count, and RNG seed from the CLI. The
-example below regenerates outputs with a new seed and smaller run size:
-
-```bash
-python benchmarks/alanine/run_benchmark.py \
-  --config benchmarks/alanine/config.json \
-  --outdir benchmarks/alanine/out_custom \
-  --steps 2000 \
-  --bins 50 \
-  --seed 2026
-```
+   ```bash
+   python cli.py pipeline \
+     --config benchmarks/alanine/explicit/config.yml \
+     --out benchmarks/alanine/explicit/out
+   ```
 
 ## Notes
 
-- The benchmark is deterministic for a fixed seed.
-- The runtime report includes the elapsed time and steps/second to help compare
-  runs across hardware.
+- The benchmark requires an AmberTools installation with `tleap` available
+  (`AMBERHOME` set or `tleap` on `PATH`).
+- The configs default to CUDA and require a GPU; edit `config.yml` if you want
+  to run on CPU.
 - To run GPU smoke tests locally, use `RUN_GPU_TESTS=1 pytest -q -m gpu`.
-
-## OpenMM CUDA alanine dipeptide MD test
-
-The repository includes an opt-in, real OpenMM CUDA integration test that runs
-alanine dipeptide (ACE–ALA–NME) in explicit solvent. The default config runs the
-full 5 ns benchmark, and you can switch to implicit solvent via the `solvent`
-key in the YAML config when using a compatible force field XML.
-
-Run the full benchmark (5 ns):
-
-```bash
-python cli.py mdtest_alanine --config benchmarks/alanine_mdtest/config.yml
-```
-
-Run the short GPU test (50 ps) used by pytest:
-
-```bash
-RUN_GPU_TESTS=1 pytest -q -m gpu
-```
+- The opt-in pipeline regression test is gated behind `RUN_REAL_MD_TESTS=1`:
+  `RUN_REAL_MD_TESTS=1 pytest -q -k real_md_pipeline`.
