@@ -207,20 +207,24 @@ def propose_boost_params(
         kurtosis_good=kurtosis_good,
         skew_good=skew_good,
     )
-    prev_k0D = k0D_base
-    prev_k0P = k0P_base
-    if freeze_bias_update(cfg, metrics):
-        # Formal stability criterion: freeze if Gaussianity is out of bounds.
-        k0D = prev_k0D
-        k0P = prev_k0P
+    if not bool(getattr(cfg, "controller_enabled", True)):
+        k0D = float(k0D_prop)
+        k0P = float(k0P_prop)
     else:
-        # Uncertainty-aware damping between previous and proposed values.
-        conf = gaussian_confidence(cfg, metrics)
-        alpha = _clamp(conf, float(cfg.policy_damp_min), float(cfg.policy_damp_max))
-        alpha *= uncertainty_scale(cfg, model_summary)
-        alpha = _clamp(alpha, 0.0, 1.0)
-        k0D = prev_k0D + alpha * (k0D_prop - prev_k0D)
-        k0P = prev_k0P + alpha * (k0P_prop - prev_k0P)
+        prev_k0D = k0D_base
+        prev_k0P = k0P_base
+        if freeze_bias_update(cfg, metrics):
+            # Formal stability criterion: freeze if Gaussianity is out of bounds.
+            k0D = prev_k0D
+            k0P = prev_k0P
+        else:
+            # Uncertainty-aware damping between previous and proposed values.
+            conf = gaussian_confidence(cfg, metrics)
+            alpha = _clamp(conf, float(cfg.policy_damp_min), float(cfg.policy_damp_max))
+            alpha *= uncertainty_scale(cfg, model_summary)
+            alpha = _clamp(alpha, 0.0, 1.0)
+            k0D = prev_k0D + alpha * (k0D_prop - prev_k0D)
+            k0P = prev_k0P + alpha * (k0P_prop - prev_k0P)
 
     k0D = _clamp(k0D, k0_min, k0_max)
     k0P = _clamp(k0P, k0_min, k0_max)

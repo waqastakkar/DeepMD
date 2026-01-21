@@ -130,6 +130,7 @@ class SimulationConfig:
 
     uncertainty_ref: float = 0.2
     uncertainty_damp_power: float = 1.0
+    controller_enabled: bool = True
 
     platform: str = "CUDA"
     precision: str = "mixed"
@@ -192,6 +193,8 @@ class SimulationConfig:
 
         _assert_range("uncertainty_ref", self.uncertainty_ref, 0.0, 1e9)
         _assert_range("uncertainty_damp_power", self.uncertainty_damp_power, 0.0, 10.0)
+        if not isinstance(self.controller_enabled, bool):
+            raise ValueError("controller_enabled must be a bool")
 
         if self.precision not in {"single", "mixed", "double"}:
             raise ValueError("precision must be one of: single|mixed|double")
