@@ -5,20 +5,22 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+if SRC.exists():
+    sys.path.insert(0, str(SRC))
 
 from paddle.config import SimulationConfig
-from paddle.stages.cmd import run_cmd
-from paddle.stages.equil_prep import run_equil_prep
-from paddle.learn.data import read_prep_logs, make_windows, time_split, save_npz_bundle
-from paddle.learn.model import TrainConfig, train_ensemble
-from paddle.stages.equil_prod import run_equil_and_prod
-
 def _resolve_outdir(base: str | None, default: str) -> Path:
     p = Path(base) if base else Path(default)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def cmd_cmd(ns):
+    from paddle.stages.cmd import run_cmd
+
     cfg = SimulationConfig.from_file(ns.config)
     if ns.out:
         cfg.outdir = ns.out
@@ -26,6 +28,8 @@ def cmd_cmd(ns):
     run_cmd(cfg)
 
 def cmd_prep(ns):
+    from paddle.stages.equil_prep import run_equil_prep
+
     cfg = SimulationConfig.from_file(ns.config)
     if ns.out:
         cfg.outdir = ns.out
@@ -33,6 +37,8 @@ def cmd_prep(ns):
     run_equil_prep(cfg)
 
 def cmd_data(ns):
+    from paddle.learn.data import read_prep_logs, make_windows, time_split, save_npz_bundle
+
     prep_dir = Path(ns.prep)
     out_dir = Path(ns.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -45,6 +51,8 @@ def cmd_data(ns):
     print(f"Dataset saved to: {out_dir}")
 
 def cmd_train(ns):
+    from paddle.learn.model import TrainConfig, train_ensemble
+
     cfg = TrainConfig(
         epochs=ns.epochs, batch=ns.batch, ensemble=ns.ensemble,
         hidden=[int(x) for x in ns.hidden.split(",")] if ns.hidden else None,
@@ -53,6 +61,8 @@ def cmd_train(ns):
     train_ensemble(ns.data, ns.splits, ns.out, cfg)
 
 def cmd_equil_prod(ns):
+    from paddle.stages.equil_prod import run_equil_and_prod
+
     cfg = SimulationConfig.from_file(ns.config)
     if ns.out:
         cfg.outdir = ns.out
@@ -60,6 +70,12 @@ def cmd_equil_prod(ns):
     run_equil_and_prod(cfg)
 
 def cmd_pipeline(ns):
+    from paddle.stages.cmd import run_cmd
+    from paddle.stages.equil_prep import run_equil_prep
+    from paddle.stages.equil_prod import run_equil_and_prod
+    from paddle.learn.data import read_prep_logs, make_windows, time_split, save_npz_bundle
+    from paddle.learn.model import TrainConfig, train_ensemble
+
     cfg = SimulationConfig.from_file(ns.config)
     out_root = _resolve_outdir(ns.out, "out_pipeline")
     cfg.outdir = str(out_root)

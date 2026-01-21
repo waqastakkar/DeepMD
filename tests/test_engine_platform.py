@@ -1,11 +1,24 @@
+from pathlib import Path
+import sys
+
 import pytest
 
-from config import SimulationConfig
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from paddle.config import SimulationConfig
 
 
 def test_simulation_config_determinism_and_precision():
+    config_path = str(Path(__file__).resolve())
     cfg = SimulationConfig.from_dict(
-        {"precision": "double", "deterministic_forces": True}
+        {
+            "precision": "double",
+            "deterministic_forces": True,
+            "parmFile": config_path,
+            "crdFile": config_path,
+        }
     )
 
     assert cfg.precision == "double"
@@ -14,7 +27,7 @@ def test_simulation_config_determinism_and_precision():
 
 def test_get_platform_cpu_properties():
     pytest.importorskip("openmm")
-    from core.engine import get_platform
+    from paddle.core.engine import get_platform
 
     plat, props = get_platform(name="CPU", precision="double", deterministic_forces=True)
 
@@ -24,7 +37,7 @@ def test_get_platform_cpu_properties():
 
 def test_get_platform_fallback_to_cpu():
     pytest.importorskip("openmm")
-    from core.engine import get_platform
+    from paddle.core.engine import get_platform
 
     plat, props = get_platform(name="NotAPlatform", precision="mixed", deterministic_forces=True)
 
@@ -34,7 +47,7 @@ def test_get_platform_fallback_to_cpu():
 
 def test_get_platform_cuda_properties_when_available():
     openmm = pytest.importorskip("openmm")
-    from core.engine import get_platform
+    from paddle.core.engine import get_platform
 
     names = {
         openmm.Platform.getPlatform(i).getName()

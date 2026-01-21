@@ -5,9 +5,9 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "io"))
+sys.path.insert(0, str(ROOT / "src"))
 
-from restart import read_restart, write_restart, RestartRecord  # noqa: E402
+from paddle.io.restart import read_restart, write_restart, RestartRecord  # noqa: E402
 
 
 def test_restart_roundtrip_preserves_content(tmp_path):

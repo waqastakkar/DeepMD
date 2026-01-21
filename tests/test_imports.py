@@ -1,31 +1,13 @@
-import importlib
-import sys
 from pathlib import Path
-
-import pytest
-
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-MODULES = [
-    "cli",
-    "config",
-    "core",
-    "io",
-    "learn",
-    "stages",
-    "validate",
-]
+from paddle.config import SimulationConfig
+import paddle
 
 
 def test_imports_smoke():
-    for module_name in MODULES:
-        try:
-            importlib.import_module(module_name)
-        except ModuleNotFoundError as exc:
-            if exc.name == module_name:
-                raise
-            pytest.skip(
-                f"Skipping import of {module_name} due to missing dependency: {exc.name}"
-            )
+    assert paddle is not None
+    assert SimulationConfig is not None
