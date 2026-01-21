@@ -94,7 +94,7 @@ def run_minimization(cfg: SimulationConfig, sim, outdir: Path) -> None:
         )
         return
 
-    tolerance = cfg.minimize_tolerance_kj_per_mol * unit.kilojoule_per_mole
+    tolerance = cfg.minimize_tolerance_kj_per_mol * (unit.kilojoule_per_mole / unit.nanometer)
     sim.minimizeEnergy(tolerance=tolerance, maxIterations=int(cfg.minimize_max_iter))
     ended = timestamp()
     _write_stage_summary(
