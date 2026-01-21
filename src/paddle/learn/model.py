@@ -166,6 +166,23 @@ def train_ensemble(npz: str | Path, splits: str | Path, out_dir: str | Path, cfg
     mu_te, sig_te = ensemble_predict(out, X[a:b], batch=cfg.batch)
     y_te = y[a:b]
     metrics = compute_metrics(y_te, mu_te, sig_te)
+    try:
+        a_val, b_val = sp["val"]
+        mu_val, sig_val = ensemble_predict(out, X[a_val:b_val], batch=cfg.batch)
+        alpha = 0.1
+        qhat = conformal_qhat(y[a_val:b_val], mu_val, sig_val, alpha=alpha)
+        diag = conformal_diagnostics(y_te, mu_te, sig_te, qhat)
+        metrics["conformal_alpha"] = float(alpha)
+        metrics["conformal_qhat"] = float(qhat)
+        metrics["conformal_coverage_test"] = float(diag["conformal_coverage"])
+        metrics["conformal_mean_halfwidth_test"] = float(diag["conformal_mean_halfwidth"])
+        metrics["mean_sigma_uncalibrated"] = float(np.mean(sig_te))
+        metrics["uncertainty"] = float(diag["conformal_mean_halfwidth"])
+    except Exception as exc:
+        print(
+            "Warning: conformal calibration failed; using uncalibrated uncertainty. "
+            f"Error: {exc}"
+        )
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     export_model_summary(out, metrics)
 
@@ -232,6 +249,51 @@ def compute_metrics(y_true: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> Di
     }
 
 
+def conformal_qhat(
+    y_true: np.ndarray, mu: np.ndarray, sigma: np.ndarray, alpha: float = 0.1
+) -> float:
+    """
+    Compute conformal scaling factor qhat for predictive intervals mu ± qhat*sigma.
+    Uses validation residual scores s_i = max_j |y_i,j - mu_i,j| / sigma_i,j (joint across target dims).
+    qhat is the (1-alpha) conformal quantile using the standard finite-sample correction:
+        k = ceil((n + 1) * (1 - alpha))
+        qhat = sorted(scores)[k-1]
+    """
+    if not (0.0 < alpha < 1.0):
+        raise ValueError("alpha must be in (0, 1).")
+    eps = 1e-6
+    sigma_safe = np.maximum(sigma, eps)
+    resid = np.abs(y_true - mu) / sigma_safe
+    scores = np.max(resid, axis=1)
+    n = scores.shape[0]
+    if n == 0:
+        raise ValueError("No samples available for conformal calibration.")
+    k = int(np.ceil((n + 1) * (1.0 - alpha)))
+    k = min(max(k, 1), n)
+    qhat = float(np.sort(scores)[k - 1])
+    return qhat
+
+
+def conformal_diagnostics(
+    y_true: np.ndarray, mu: np.ndarray, sigma: np.ndarray, qhat: float
+) -> Dict[str, float]:
+    """
+    Return coverage and mean interval half-width under mu ± qhat*sigma.
+    Coverage is joint across dims: all(|resid| <= qhat*sigma) per sample.
+    Mean half-width is mean(qhat*sigma).
+    """
+    eps = 1e-6
+    sigma_safe = np.maximum(sigma, eps)
+    resid = np.abs(y_true - mu)
+    covered = np.all(resid <= qhat * sigma_safe, axis=1)
+    coverage = float(np.mean(covered))
+    mean_halfwidth = float(np.mean(qhat * sigma_safe))
+    return {
+        "conformal_coverage": coverage,
+        "conformal_mean_halfwidth": mean_halfwidth,
+    }
+
+
 def export_model_summary(outdir: str | Path, metrics_dict: Mapping[str, object]) -> Dict[str, object]:
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -259,6 +321,17 @@ def export_model_summary(outdir: str | Path, metrics_dict: Mapping[str, object])
     recommended_step = metrics_dict.get("recommended_step_size")
     if recommended_step is not None:
         summary["recommended_step_size"] = float(recommended_step)
+
+    conformal_fields = (
+        "conformal_alpha",
+        "conformal_qhat",
+        "conformal_coverage_test",
+        "conformal_mean_halfwidth_test",
+        "mean_sigma_uncalibrated",
+    )
+    for key in conformal_fields:
+        if key in metrics_dict and metrics_dict[key] is not None:
+            summary[key] = float(metrics_dict[key])
 
     (out / "model_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
