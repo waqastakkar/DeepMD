@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
-from core.params import BoostParams
+from paddle.core.params import BoostParams
 
 _KURTOSIS_HIGH = 1.0
 _KURTOSIS_GOOD = 0.2

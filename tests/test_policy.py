@@ -6,11 +6,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "io"))
+sys.path.insert(0, str(ROOT / "src"))
 
-from config import SimulationConfig  # noqa: E402
-from policy import propose_boost_params  # noqa: E402
-from restart import RestartRecord  # noqa: E402
+from paddle.config import SimulationConfig  # noqa: E402
+from paddle.policy import propose_boost_params  # noqa: E402
+from paddle.io.restart import RestartRecord  # noqa: E402
 
 
 def _make_restart(k0D: float, k0P: float) -> RestartRecord:

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from openmm import CustomIntegrator, unit
 
-from core.params import BoostParams
+from paddle.core.params import BoostParams
 
 _EPS = 1e-12
 
