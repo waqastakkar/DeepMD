@@ -120,6 +120,17 @@ class SimulationConfig:
     gaussian_excess_kurtosis_high: float = 1.0
     gaussian_tail_risk_good: float = 0.01
 
+    # --- NEW: closed-loop control safety + uncertainty scaling ---
+    gaussian_skew_freeze: float = 0.6
+    gaussian_excess_kurtosis_freeze: float = 2.0
+    gaussian_tail_risk_freeze: float = 0.05
+
+    policy_damp_min: float = 0.05
+    policy_damp_max: float = 1.0
+
+    uncertainty_ref: float = 0.2
+    uncertainty_damp_power: float = 1.0
+
     platform: str = "CUDA"
     precision: str = "mixed"
     require_gpu: bool = False
@@ -164,6 +175,23 @@ class SimulationConfig:
         _assert_range("gaussian_excess_kurtosis_good", self.gaussian_excess_kurtosis_good, 0.0, 10.0)
         _assert_range("gaussian_excess_kurtosis_high", self.gaussian_excess_kurtosis_high, 0.0, 10.0)
         _assert_range("gaussian_tail_risk_good", self.gaussian_tail_risk_good, 0.0, 1.0)
+
+        _assert_range("gaussian_skew_freeze", self.gaussian_skew_freeze, 0.0, 10.0)
+        _assert_range(
+            "gaussian_excess_kurtosis_freeze",
+            self.gaussian_excess_kurtosis_freeze,
+            0.0,
+            10.0,
+        )
+        _assert_range("gaussian_tail_risk_freeze", self.gaussian_tail_risk_freeze, 0.0, 1.0)
+
+        _assert_range("policy_damp_min", self.policy_damp_min, 0.0, 1.0)
+        _assert_range("policy_damp_max", self.policy_damp_max, 0.0, 1.0)
+        if self.policy_damp_min > self.policy_damp_max:
+            raise ValueError("policy_damp_min must be <= policy_damp_max")
+
+        _assert_range("uncertainty_ref", self.uncertainty_ref, 0.0, 1e9)
+        _assert_range("uncertainty_damp_power", self.uncertainty_damp_power, 0.0, 10.0)
 
         if self.precision not in {"single", "mixed", "double"}:
             raise ValueError("precision must be one of: single|mixed|double")
