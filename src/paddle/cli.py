@@ -212,6 +212,8 @@ def cmd_make_configs(ns):
     cmd_steps = ns_to_steps(ns.cmd_ns, dt_ps)
     equil_steps = ns_to_steps(ns.equil_ns_per_cycle, dt_ps)
     prod_steps = ns_to_steps(ns.prod_ns_per_cycle, dt_ps)
+    heat_steps = ns_to_steps(ns.heat_ns, dt_ps)
+    density_steps = ns_to_steps(ns.density_ns, dt_ps)
 
     explicit_cfg = SimulationConfig(
         parmFile="topology/complex.parm7",
@@ -225,6 +227,14 @@ def cmd_make_configs(ns):
         prod_ns_per_cycle=ns.prod_ns_per_cycle,
         ntcmd=cmd_steps,
         cmdRestartFreq=1000,
+        heat_ns=ns.heat_ns,
+        ntheat=heat_steps,
+        density_ns=ns.density_ns,
+        ntdensity=density_steps,
+        pressure_atm=1.0,
+        barostat_interval=25,
+        heat_report_freq=1000,
+        density_report_freq=1000,
         ntebpreppercyc=equil_steps,
         ntebpercyc=equil_steps,
         ntprodpercyc=prod_steps,
@@ -246,6 +256,14 @@ def cmd_make_configs(ns):
         prod_ns_per_cycle=ns.prod_ns_per_cycle,
         ntcmd=cmd_steps,
         cmdRestartFreq=1000,
+        heat_ns=ns.heat_ns,
+        ntheat=heat_steps,
+        density_ns=ns.density_ns,
+        ntdensity=density_steps,
+        pressure_atm=1.0,
+        barostat_interval=25,
+        heat_report_freq=1000,
+        density_report_freq=1000,
         ntebpreppercyc=equil_steps,
         ntebpercyc=equil_steps,
         ntprodpercyc=prod_steps,
@@ -350,6 +368,8 @@ def build_parser():
     p.add_argument("--cmd-ns", dest="cmd_ns", type=float, default=5.0)
     p.add_argument("--equil-ns-per-cycle", dest="equil_ns_per_cycle", type=float, default=5.0)
     p.add_argument("--prod-ns-per-cycle", dest="prod_ns_per_cycle", type=float, default=5.0)
+    p.add_argument("--heat-ns", dest="heat_ns", type=float, default=0.2)
+    p.add_argument("--density-ns", dest="density_ns", type=float, default=0.5)
     p.add_argument("--explicit-config", default=None, help="Optional explicit config filename override")
     p.add_argument("--implicit-config", default=None, help="Optional implicit config filename override")
     p.set_defaults(func=cmd_make_configs)

@@ -16,6 +16,7 @@ from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conven
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
 from paddle.learn.data import load_latent_pca, project_pca
+from paddle.stages.prep import run_density_equil, run_heating, run_minimization, transfer_state
 from paddle.policy import (
     gaussian_confidence,
     freeze_bias_update,
@@ -352,16 +353,16 @@ def _load_latent_pca_if_any(outdir: Path) -> Optional[Tuple[np.ndarray, np.ndarr
                 return None
     return None
 
-def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
+def _options_from_cfg(cfg: SimulationConfig, *, add_barostat: bool) -> EngineOptions:
     return EngineOptions(
         sim_type=cfg.simType,
         nb_cutoff_angstrom=cfg.nbCutoff,
         platform_name=cfg.platform,
         precision=cfg.precision,
         deterministic_forces=cfg.deterministic_forces,
-        add_barostat=is_explicit_simtype(cfg.simType),
-        barostat_pressure_atm=1.0,
-        barostat_interval=25,
+        add_barostat=add_barostat and is_explicit_simtype(cfg.simType),
+        barostat_pressure_atm=cfg.pressure_atm,
+        barostat_interval=cfg.barostat_interval,
     )
 
 def _run_equil_cycle(
@@ -652,7 +653,7 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
     params.refED_factor = cfg.refED_factor
     params.refEP_factor = cfg.refEP_factor
 
-    integ = make_dual_prod(dt_ps=0.002, temperature_K=cfg.temperature, params=params)
+    integ = make_dual_prod(dt_ps=_resolve_dt_ps(cfg), temperature_K=cfg.temperature, params=params)
 
     # ---- NEW: bind the new integrator
     _attach_integrator(sim, integ)
@@ -730,17 +731,33 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     ensure_dir(outdir)
     set_global_seed(cfg.seed)
 
-    opts = _options_from_cfg(cfg)
-    integ0 = make_conventional(dt_ps=0.002, temperature_K=cfg.temperature, collision_rate_ps=1.0)
-    sim = create_simulation(cfg.parmFile, cfg.crdFile, integ0, opts)
-    _assign_force_groups(sim)
-
-    loaded = _load_cmd_checkpoint_if_any(sim, outdir)
+    dt_ps = _resolve_dt_ps(cfg)
+    cmd_checkpoint = outdir / "cmd.rst"
+    loaded = False
+    if cmd_checkpoint.exists():
+        opts_npt = _options_from_cfg(cfg, add_barostat=True)
+        integ0 = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
+        sim = create_simulation(cfg.parmFile, cfg.crdFile, integ0, opts_npt)
+        loaded = _load_cmd_checkpoint_if_any(sim, outdir)
     if not loaded:
-        sim.minimizeEnergy()
-        _check_state_finite(sim, "minimize", outdir)
-        sim.context.setVelocitiesToTemperature(cfg.temperature * unit.kelvin)
-        _check_state_finite(sim, "velocities", outdir)
+        opts_nvt = _options_from_cfg(cfg, add_barostat=False)
+        integ_nvt = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
+        sim_nvt = create_simulation(cfg.parmFile, cfg.crdFile, integ_nvt, opts_nvt)
+        run_minimization(cfg, sim_nvt, outdir)
+        run_heating(cfg, sim_nvt, outdir)
+        if not cfg.do_heating:
+            sim_nvt.context.setVelocitiesToTemperature(cfg.temperature * unit.kelvin)
+        if is_explicit_simtype(cfg.simType):
+            opts_npt = _options_from_cfg(cfg, add_barostat=True)
+            integ0 = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
+            sim = create_simulation(cfg.parmFile, cfg.crdFile, integ0, opts_npt)
+            transfer_state(sim_nvt, sim)
+        else:
+            sim = sim_nvt
+        run_density_equil(cfg, sim, outdir)
+        _check_state_finite(sim, "prep", outdir)
+
+    _assign_force_groups(sim)
 
     write_run_manifest(outdir, {
         "stage": "equil+prod",
@@ -749,8 +766,8 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
         "ntebpercyc": int(cfg.ntebpercyc),
         "ntprodpercyc": int(cfg.ntprodpercyc),
         "temperature": float(cfg.temperature),
-        "platform": opts.platform_name,
-        "precision": opts.precision,
+        "platform": sim.context.getPlatform().getName(),
+        "precision": cfg.precision,
     })
 
     rec: Optional[RestartRecord] = None
