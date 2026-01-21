@@ -1,0 +1,12 @@
+platform: CUDA
+require_gpu: true
+cuda_device_index: 0
+cuda_precision: mixed
+temperature: 300
+dt_fs: 2.0
+friction_per_ps: 1.0
+steps_total: 2500000
+report_interval: 10000
+output_dir: benchmarks/alanine_mdtest/out
+write_trajectory: false
+trajectory_interval: 10000
