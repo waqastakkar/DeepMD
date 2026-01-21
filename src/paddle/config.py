@@ -149,6 +149,24 @@ class SimulationConfig:
     ntcmd: int = 2_500_000
     cmdRestartFreq: int = 100
 
+    do_minimize: bool = True
+    minimize_max_iter: int = 5000
+    minimize_tolerance_kj_per_mol: float = 10.0
+
+    do_heating: bool = True
+    heat_t_start: float = 0.0
+    heat_t_end: float = 300.0
+    heat_ns: float = 0.2
+    ntheat: int = 100_000
+    heat_report_freq: int = 1000
+
+    do_density_equil: bool = True
+    density_ns: float = 0.5
+    ntdensity: int = 250_000
+    pressure_atm: float = 1.0
+    barostat_interval: int = 25
+    density_report_freq: int = 1000
+
     ncycebprepstart: int = 0
     ncycebprepend: int = 1
     ntebpreppercyc: int = 2_500_000
@@ -216,11 +234,19 @@ class SimulationConfig:
         _assert_range("cmd_ns", self.cmd_ns, 1e-12)
         _assert_range("equil_ns_per_cycle", self.equil_ns_per_cycle, 1e-12)
         _assert_range("prod_ns_per_cycle", self.prod_ns_per_cycle, 1e-12)
+        _assert_range("minimize_tolerance_kj_per_mol", self.minimize_tolerance_kj_per_mol, 0.0)
+        _assert_range("heat_ns", self.heat_ns, 0.0)
+        _assert_range("heat_t_start", self.heat_t_start, 0.0, 5000.0)
+        _assert_range("heat_t_end", self.heat_t_end, 0.0, 5000.0)
+        _assert_range("density_ns", self.density_ns, 0.0)
+        _assert_range("pressure_atm", self.pressure_atm, 0.0, 10000.0)
 
         for name in [
             "ntcmd", "cmdRestartFreq", "ntebpreppercyc", "ebprepRestartFreq",
             "ntebpercyc", "ebRestartFreq", "ntprodpercyc", "prodRestartFreq",
-            "ncycebprepend", "ncycebend", "ncycprodend"
+            "ncycebprepend", "ncycebend", "ncycprodend",
+            "minimize_max_iter", "ntheat", "heat_report_freq",
+            "ntdensity", "barostat_interval", "density_report_freq",
         ]:
             val = getattr(self, name)
             if not isinstance(val, int) or val <= 0:
@@ -257,6 +283,9 @@ class SimulationConfig:
         _assert_range("uncertainty_damp_power", self.uncertainty_damp_power, 0.0, 10.0)
         if not isinstance(self.controller_enabled, bool):
             raise ValueError("controller_enabled must be a bool")
+        for name in ("do_minimize", "do_heating", "do_density_equil"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool")
 
         if self.precision not in {"single", "mixed", "double"}:
             raise ValueError("precision must be one of: single|mixed|double")
@@ -312,6 +341,22 @@ class SimulationConfig:
         elif "ntprodpercyc" in input_keys:
             self.prod_ns_per_cycle = steps_to_ns(self.ntprodpercyc, dt_ps)
 
+        if "heat_ns" in input_keys:
+            expected = ns_to_steps(self.heat_ns, dt_ps)
+            if "ntheat" in input_keys:
+                _check_inconsistency("ntheat", expected, self.ntheat, "heat_ns")
+            self.ntheat = expected
+        elif "ntheat" in input_keys:
+            self.heat_ns = steps_to_ns(self.ntheat, dt_ps)
+
+        if "density_ns" in input_keys:
+            expected = ns_to_steps(self.density_ns, dt_ps)
+            if "ntdensity" in input_keys:
+                _check_inconsistency("ntdensity", expected, self.ntdensity, "density_ns")
+            self.ntdensity = expected
+        elif "ntdensity" in input_keys:
+            self.density_ns = steps_to_ns(self.ntdensity, dt_ps)
+
     def check_timestep_consistency(self) -> None:
         if self.dt is None:
             self.dt = 0.002
@@ -319,6 +364,8 @@ class SimulationConfig:
         expected_cmd = ns_to_steps(self.cmd_ns, dt_ps)
         expected_equil = ns_to_steps(self.equil_ns_per_cycle, dt_ps)
         expected_prod = ns_to_steps(self.prod_ns_per_cycle, dt_ps)
+        expected_heat = ns_to_steps(self.heat_ns, dt_ps)
+        expected_density = ns_to_steps(self.density_ns, dt_ps)
         if self.ntcmd != expected_cmd:
             raise ValueError(f"ntcmd={self.ntcmd} does not match cmd_ns={self.cmd_ns} (expected {expected_cmd})")
         if self.ntebpreppercyc != expected_equil:
@@ -335,6 +382,14 @@ class SimulationConfig:
             raise ValueError(
                 f"ntprodpercyc={self.ntprodpercyc} does not match prod_ns_per_cycle="
                 f"{self.prod_ns_per_cycle} (expected {expected_prod})"
+            )
+        if self.ntheat != expected_heat:
+            raise ValueError(
+                f"ntheat={self.ntheat} does not match heat_ns={self.heat_ns} (expected {expected_heat})"
+            )
+        if self.ntdensity != expected_density:
+            raise ValueError(
+                f"ntdensity={self.ntdensity} does not match density_ns={self.density_ns} (expected {expected_density})"
             )
 
     def as_dict(self) -> Dict[str, Any]:
@@ -424,6 +479,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cmd_ns", type=float, default=None)
     ap.add_argument("--equil_ns_per_cycle", type=float, default=None)
     ap.add_argument("--prod_ns_per_cycle", type=float, default=None)
+    ap.add_argument("--do_minimize", action="store_true", default=None)
+    ap.add_argument("--do_heating", action="store_true", default=None)
+    ap.add_argument("--do_density_equil", action="store_true", default=None)
+    ap.add_argument("--minimize_max_iter", type=int, default=None)
+    ap.add_argument("--minimize_tolerance_kj_per_mol", type=float, default=None)
+    ap.add_argument("--heat_t_start", type=float, default=None)
+    ap.add_argument("--heat_t_end", type=float, default=None)
+    ap.add_argument("--heat_ns", type=float, default=None)
+    ap.add_argument("--ntheat", type=int, default=None)
+    ap.add_argument("--heat_report_freq", type=int, default=None)
+    ap.add_argument("--density_ns", type=float, default=None)
+    ap.add_argument("--ntdensity", type=int, default=None)
+    ap.add_argument("--pressure_atm", type=float, default=None)
+    ap.add_argument("--barostat_interval", type=int, default=None)
+    ap.add_argument("--density_report_freq", type=int, default=None)
     ap.add_argument("--ntcmd", type=int, default=None)
     ap.add_argument("--cmdRestartFreq", type=int, default=None)
     ap.add_argument("--ncycebprepstart", type=int, default=None)
@@ -476,6 +546,10 @@ def _apply_overrides(cfg: SimulationConfig, ns: argparse.Namespace) -> Simulatio
         "ntebpreppercyc",
         "ntebpercyc",
         "ntprodpercyc",
+        "heat_ns",
+        "ntheat",
+        "density_ns",
+        "ntdensity",
     }:
         cfg.reconcile_time_settings(input_keys=overridden)
     return cfg

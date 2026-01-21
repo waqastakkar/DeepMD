@@ -8,29 +8,41 @@ from openmm import XmlSerializer, unit
 from openmm.app import DCDReporter, StateDataReporter
 
 from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
-from paddle.core.engine import EngineOptions, create_simulation, minimize_and_initialize
+from paddle.core.engine import EngineOptions, create_simulation
 from paddle.core.integrators import make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest
+from paddle.stages.prep import run_density_equil, run_heating, run_minimization, transfer_state
 
-def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
+def _options_from_cfg(cfg: SimulationConfig, *, add_barostat: bool) -> EngineOptions:
     return EngineOptions(
         sim_type=cfg.simType,
         nb_cutoff_angstrom=cfg.nbCutoff,
         platform_name=cfg.platform,
         precision=cfg.precision,
         deterministic_forces=cfg.deterministic_forces,
-        add_barostat=is_explicit_simtype(cfg.simType),
-        barostat_pressure_atm=1.0,
-        barostat_interval=25,
+        add_barostat=add_barostat and is_explicit_simtype(cfg.simType),
+        barostat_pressure_atm=cfg.pressure_atm,
+        barostat_interval=cfg.barostat_interval,
     )
 
 def run_cmd(cfg: SimulationConfig) -> None:
     ensure_dir(Path(cfg.outdir))
     set_global_seed(cfg.seed)
-    integ = make_conventional(dt_ps=0.002, temperature_K=cfg.temperature, collision_rate_ps=1.0)
-    opts = _options_from_cfg(cfg)
-    sim = create_simulation(cfg.parmFile, cfg.crdFile, integ, opts)
-    minimize_and_initialize(sim, cfg.temperature, set_velocities=True)
+    dt_ps = float(cfg.dt or 0.002)
+    integ = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
+    opts_nvt = _options_from_cfg(cfg, add_barostat=False)
+    sim = create_simulation(cfg.parmFile, cfg.crdFile, integ, opts_nvt)
+    run_minimization(cfg, sim, Path(cfg.outdir))
+    run_heating(cfg, sim, Path(cfg.outdir))
+    if not cfg.do_heating:
+        sim.context.setVelocitiesToTemperature(cfg.temperature * unit.kelvin)
+    if is_explicit_simtype(cfg.simType):
+        opts_npt = _options_from_cfg(cfg, add_barostat=True)
+        integ_npt = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
+        sim_npt = create_simulation(cfg.parmFile, cfg.crdFile, integ_npt, opts_npt)
+        transfer_state(sim, sim_npt)
+        sim = sim_npt
+    run_density_equil(cfg, sim, Path(cfg.outdir))
 
     dcd_path = Path(cfg.outdir) / "cmd.dcd"
     log_path = Path(cfg.outdir) / "cmd-state.log"
@@ -49,7 +61,19 @@ def run_cmd(cfg: SimulationConfig) -> None:
         temperature=True, volume=False, density=True, speed=True, separator="\t",
     ))
 
-    sim.step(cfg.ntcmd)
+    total_ps = cfg.ntcmd * dt_ps
+    total_ns = total_ps / 1000.0
+    print(f"[CMD] ntcmd={cfg.ntcmd} dt_ps={dt_ps} total_ps={total_ps} total_ns={total_ns}")
+    steps_advanced = 0
+    chunk = max(1, int(cfg.cmdRestartFreq))
+    remaining = int(cfg.ntcmd)
+    while remaining > 0:
+        n = min(chunk, remaining)
+        sim.step(n)
+        steps_advanced += n
+        remaining -= n
+    if cfg.safe_mode or cfg.validate_config:
+        assert steps_advanced == cfg.ntcmd
 
     state = sim.context.getState(getPositions=True, getVelocities=True, getForces=False, getEnergy=False)
     with open(rst_path, "w", encoding="utf-8") as f:
@@ -59,9 +83,9 @@ def run_cmd(cfg: SimulationConfig) -> None:
         "stage": "cmd",
         "steps": cfg.ntcmd,
         "report_interval": cfg.cmdRestartFreq,
-        "platform": opts.platform_name,
-        "precision": opts.precision,
-        "deterministic_forces": opts.deterministic_forces,
+        "platform": sim.context.getPlatform().getName(),
+        "precision": cfg.precision,
+        "deterministic_forces": cfg.deterministic_forces,
         "simType": cfg.simType,
         "temperature": cfg.temperature,
     })
