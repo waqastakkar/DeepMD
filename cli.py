@@ -103,6 +103,24 @@ def cmd_pipeline(ns):
     else:
         print("[4/5] TRAIN skipped.")
     print("[5/5] EQUIL+PROD…"); run_equil_and_prod(cfg)
+    if ns.plot:
+        try:
+            from pathlib import Path
+            import subprocess
+            out_root = Path(cfg.outdir)
+            # Only run if at least one bias_plan file exists
+            if any(out_root.glob("bias_plan_cycle_*.json")):
+                subprocess.run(
+                    [sys.executable, str(Path("scripts") / "plot_controller_diagnostics.py"),
+                     "--run", str(out_root),
+                     "--out", str(out_root / "controller_diagnostics.svg")],
+                    check=False
+                )
+                print(f"[PLOT] Wrote: {out_root / 'controller_diagnostics.svg'}")
+            else:
+                print("[PLOT] No bias_plan_cycle_*.json found; skipping plots.")
+        except Exception as e:
+            print(f"[PLOT] Plot generation failed: {e}")
 
 
 def cmd_bench_alanine(ns):
@@ -184,6 +202,9 @@ def build_parser():
     p.add_argument("--epochs", type=int, default=50); p.add_argument("--batch", type=int, default=256); p.add_argument("--ensemble", type=int, default=3)
     p.add_argument("--hidden", default="256,256"); p.add_argument("--dropout", type=float, default=0.1); p.add_argument("--patience", type=int, default=8); p.add_argument("--seed", type=int, default=2025)
     p.add_argument("--skip-train", action="store_true")
+    plot_group = p.add_mutually_exclusive_group()
+    plot_group.add_argument("--plot", dest="plot", action="store_true", default=True)
+    plot_group.add_argument("--no-plot", dest="plot", action="store_false")
     p.set_defaults(func=cmd_pipeline)
     p = sub.add_parser("bench_alanine", help="Generate alanine dipeptide benchmarks with tleap")
     p.add_argument("--out", default="benchmarks/alanine")
