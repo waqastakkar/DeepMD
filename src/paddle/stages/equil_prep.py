@@ -7,7 +7,7 @@ from pathlib import Path
 from openmm import XmlSerializer, unit
 
 from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
-from paddle.core.engine import EngineOptions, create_simulation, minimize_and_initialize
+from paddle.core.engine import EngineOptions, create_simulation, log_simulation_start, minimize_and_initialize
 from paddle.core.integrators import make_conventional
 from paddle.io.report import CSVLogger, ensure_dir, write_run_manifest, append_metrics
 
@@ -17,10 +17,15 @@ def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
         nb_cutoff_angstrom=cfg.nbCutoff,
         platform_name=cfg.platform,
         precision=cfg.precision,
+        cuda_precision=cfg.cuda_precision,
+        cuda_device_index=cfg.cuda_device_index,
         deterministic_forces=cfg.deterministic_forces,
         add_barostat=is_explicit_simtype(cfg.simType),
         barostat_pressure_atm=1.0,
         barostat_interval=25,
+        ewald_error_tolerance=cfg.ewaldErrorTolerance,
+        use_dispersion_correction=cfg.useDispersionCorrection,
+        rigid_water=cfg.rigidWater,
     )
 
 def _assign_force_groups(sim) -> None:
@@ -51,9 +56,22 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
 
     set_global_seed(cfg.seed)
 
-    integ = make_conventional(dt_ps=0.002, temperature_K=cfg.temperature, collision_rate_ps=1.0)
+    dt_ps = float(cfg.dt or 0.002)
+    integ = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
     opts = _options_from_cfg(cfg)
     sim = create_simulation(cfg.parmFile, cfg.crdFile, integ, opts)
+    log_simulation_start(
+        stage="EQUIL_PREP",
+        platform_name=sim.context.getPlatform().getName(),
+        precision=opts.cuda_precision if cfg.platform == "CUDA" else opts.precision,
+        deterministic_forces=opts.deterministic_forces,
+        dt_ps=dt_ps,
+        ntcmd=cfg.ntcmd,
+        ntprodpercyc=cfg.ntprodpercyc,
+        explicit=is_explicit_simtype(cfg.simType),
+        rigid_water=opts.rigid_water,
+        ewald_error_tolerance=opts.ewald_error_tolerance,
+    )
 
     _assign_force_groups(sim)
     loaded = _load_cmd_checkpoint_if_any(sim, outdir)

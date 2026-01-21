@@ -29,6 +29,9 @@ def transfer_state(src_sim, dst_sim) -> None:
 
 
 def _set_integrator_temperature(integrator, temperature_k: float) -> None:
+    if hasattr(integrator, "setTemperature"):
+        integrator.setTemperature(temperature_k * unit.kelvin)
+        return
     thermal_energy = (
         unit.BOLTZMANN_CONSTANT_kB
         * unit.AVOGADRO_CONSTANT_NA

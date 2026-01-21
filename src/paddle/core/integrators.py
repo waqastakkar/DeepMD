@@ -3,7 +3,7 @@ core/integrators.py — Custom OpenMM integrators for PADDLE
 """
 from __future__ import annotations
 
-from openmm import CustomIntegrator, unit
+from openmm import CustomIntegrator, LangevinMiddleIntegrator, unit
 
 from paddle.core.params import BoostParams
 
@@ -164,8 +164,12 @@ class DualDeepLearningGaMDProduction(CustomIntegrator):
         self.addConstrainPositions()
         self.addComputePerDof("v", "(x - oldx)/dt")
 
-def make_conventional(dt_ps: float, temperature_K: float, collision_rate_ps: float = 1.0) -> ConventionalMDIntegrator:
-    return ConventionalMDIntegrator(dt_ps=dt_ps, temperature_K=temperature_K, collision_rate_ps=collision_rate_ps)
+def make_conventional(dt_ps: float, temperature_K: float, collision_rate_ps: float = 1.0) -> LangevinMiddleIntegrator:
+    return LangevinMiddleIntegrator(
+        temperature_K * unit.kelvin,
+        collision_rate_ps / unit.picosecond,
+        dt_ps * unit.picoseconds,
+    )
 
 def make_dual_equil(dt_ps: float, temperature_K: float, params: BoostParams) -> DualDeepLearningGaMDEquilibration:
     return DualDeepLearningGaMDEquilibration(dt_ps=dt_ps, temperature_K=temperature_K, params=params)

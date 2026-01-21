@@ -11,7 +11,7 @@ from openmm import XmlSerializer, unit
 from openmm.app import DCDReporter, StateDataReporter
 import openmm as mm
 from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
-from paddle.core.engine import EngineOptions, create_simulation
+from paddle.core.engine import EngineOptions, create_simulation, log_simulation_start
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
@@ -359,10 +359,15 @@ def _options_from_cfg(cfg: SimulationConfig, *, add_barostat: bool) -> EngineOpt
         nb_cutoff_angstrom=cfg.nbCutoff,
         platform_name=cfg.platform,
         precision=cfg.precision,
+        cuda_precision=cfg.cuda_precision,
+        cuda_device_index=cfg.cuda_device_index,
         deterministic_forces=cfg.deterministic_forces,
         add_barostat=add_barostat and is_explicit_simtype(cfg.simType),
         barostat_pressure_atm=cfg.pressure_atm,
         barostat_interval=cfg.barostat_interval,
+        ewald_error_tolerance=cfg.ewaldErrorTolerance,
+        use_dispersion_correction=cfg.useDispersionCorrection,
+        rigid_water=cfg.rigidWater,
     )
 
 def _run_equil_cycle(
@@ -732,17 +737,46 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     set_global_seed(cfg.seed)
 
     dt_ps = _resolve_dt_ps(cfg)
+    logged = False
     cmd_checkpoint = outdir / "cmd.rst"
     loaded = False
     if cmd_checkpoint.exists():
         opts_npt = _options_from_cfg(cfg, add_barostat=True)
         integ0 = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
         sim = create_simulation(cfg.parmFile, cfg.crdFile, integ0, opts_npt)
+        if not logged:
+            log_simulation_start(
+                stage="EQUIL+PROD",
+                platform_name=sim.context.getPlatform().getName(),
+                precision=opts_npt.cuda_precision if cfg.platform == "CUDA" else opts_npt.precision,
+                deterministic_forces=opts_npt.deterministic_forces,
+                dt_ps=dt_ps,
+                ntcmd=cfg.ntcmd,
+                ntprodpercyc=cfg.ntprodpercyc,
+                explicit=is_explicit_simtype(cfg.simType),
+                rigid_water=opts_npt.rigid_water,
+                ewald_error_tolerance=opts_npt.ewald_error_tolerance,
+            )
+            logged = True
         loaded = _load_cmd_checkpoint_if_any(sim, outdir)
     if not loaded:
         opts_nvt = _options_from_cfg(cfg, add_barostat=False)
         integ_nvt = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
         sim_nvt = create_simulation(cfg.parmFile, cfg.crdFile, integ_nvt, opts_nvt)
+        if not logged:
+            log_simulation_start(
+                stage="EQUIL+PROD",
+                platform_name=sim_nvt.context.getPlatform().getName(),
+                precision=opts_nvt.cuda_precision if cfg.platform == "CUDA" else opts_nvt.precision,
+                deterministic_forces=opts_nvt.deterministic_forces,
+                dt_ps=dt_ps,
+                ntcmd=cfg.ntcmd,
+                ntprodpercyc=cfg.ntprodpercyc,
+                explicit=is_explicit_simtype(cfg.simType),
+                rigid_water=opts_nvt.rigid_water,
+                ewald_error_tolerance=opts_nvt.ewald_error_tolerance,
+            )
+            logged = True
         run_minimization(cfg, sim_nvt, outdir)
         run_heating(cfg, sim_nvt, outdir)
         if not cfg.do_heating:

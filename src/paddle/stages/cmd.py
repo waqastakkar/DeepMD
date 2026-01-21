@@ -8,7 +8,7 @@ from openmm import XmlSerializer, unit
 from openmm.app import DCDReporter, StateDataReporter
 
 from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
-from paddle.core.engine import EngineOptions, create_simulation
+from paddle.core.engine import EngineOptions, create_simulation, log_simulation_start
 from paddle.core.integrators import make_conventional
 from paddle.io.report import ensure_dir, write_run_manifest
 from paddle.stages.prep import run_density_equil, run_heating, run_minimization, transfer_state
@@ -19,10 +19,15 @@ def _options_from_cfg(cfg: SimulationConfig, *, add_barostat: bool) -> EngineOpt
         nb_cutoff_angstrom=cfg.nbCutoff,
         platform_name=cfg.platform,
         precision=cfg.precision,
+        cuda_precision=cfg.cuda_precision,
+        cuda_device_index=cfg.cuda_device_index,
         deterministic_forces=cfg.deterministic_forces,
         add_barostat=add_barostat and is_explicit_simtype(cfg.simType),
         barostat_pressure_atm=cfg.pressure_atm,
         barostat_interval=cfg.barostat_interval,
+        ewald_error_tolerance=cfg.ewaldErrorTolerance,
+        use_dispersion_correction=cfg.useDispersionCorrection,
+        rigid_water=cfg.rigidWater,
     )
 
 def run_cmd(cfg: SimulationConfig) -> None:
@@ -32,6 +37,18 @@ def run_cmd(cfg: SimulationConfig) -> None:
     integ = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
     opts_nvt = _options_from_cfg(cfg, add_barostat=False)
     sim = create_simulation(cfg.parmFile, cfg.crdFile, integ, opts_nvt)
+    log_simulation_start(
+        stage="CMD",
+        platform_name=sim.context.getPlatform().getName(),
+        precision=opts_nvt.cuda_precision if cfg.platform == "CUDA" else opts_nvt.precision,
+        deterministic_forces=opts_nvt.deterministic_forces,
+        dt_ps=dt_ps,
+        ntcmd=cfg.ntcmd,
+        ntprodpercyc=cfg.ntprodpercyc,
+        explicit=is_explicit_simtype(cfg.simType),
+        rigid_water=opts_nvt.rigid_water,
+        ewald_error_tolerance=opts_nvt.ewald_error_tolerance,
+    )
     run_minimization(cfg, sim, Path(cfg.outdir))
     run_heating(cfg, sim, Path(cfg.outdir))
     if not cfg.do_heating:
