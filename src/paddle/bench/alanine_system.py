@@ -56,10 +56,17 @@ END
             model="tip3p",
             padding=0.8 * unit.nanometer,
         )
+        box_vectors = modeller.topology.getPeriodicBoxVectors()
+        if box_vectors is None:
+            raise RuntimeError("Explicit solvent requested but no periodic box vectors set.")
+        min_box_length = min(vec.length() for vec in box_vectors)
+        max_cutoff = 0.5 * min_box_length - 0.05 * unit.nanometer
+        min_cutoff = 0.1 * unit.nanometer
+        nonbonded_cutoff = min(1.0 * unit.nanometer, max(min_cutoff, max_cutoff))
         system = forcefield.createSystem(
             modeller.topology,
             nonbondedMethod=PME,
-            nonbondedCutoff=1.0 * unit.nanometer,
+            nonbondedCutoff=nonbonded_cutoff,
             constraints=HBonds,
             rigidWater=True,
             ewaldErrorTolerance=1e-4,
