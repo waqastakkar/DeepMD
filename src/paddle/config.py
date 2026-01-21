@@ -10,6 +10,7 @@ import os
 import platform
 import random
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -208,9 +209,12 @@ class SimulationConfig:
     platform: str = "CUDA"
     precision: str = "mixed"
     require_gpu: bool = False
-    cuda_device_index: int = 0
+    cuda_device_index: Optional[int] = None
     cuda_precision: str = "mixed"
     deterministic_forces: bool = False  # set True if you need bitwise reproducibility
+    ewaldErrorTolerance: float = 5e-4
+    useDispersionCorrection: bool = True
+    rigidWater: bool = True
 
     seed: int = 2025
     outdir: str = "out"
@@ -291,6 +295,13 @@ class SimulationConfig:
             raise ValueError("precision must be one of: single|mixed|double")
         if self.cuda_precision not in {"single", "mixed", "double"}:
             raise ValueError("cuda_precision must be one of: single|mixed|double")
+        if self.cuda_device_index is not None:
+            if not isinstance(self.cuda_device_index, int) or self.cuda_device_index < 0:
+                raise ValueError("cuda_device_index must be a non-negative integer if set")
+        _assert_range("ewaldErrorTolerance", self.ewaldErrorTolerance, 1e-8, 1e-2)
+        for name in ("useDispersionCorrection", "rigidWater"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool")
         if self.require_gpu and self.platform != "CUDA":
             raise ValueError("require_gpu is true but platform is not CUDA")
 
@@ -311,6 +322,7 @@ class SimulationConfig:
                 )
                 if self.safe_mode:
                     raise ValueError(msg)
+                warnings.warn(msg, RuntimeWarning)
 
         if "cmd_ns" in input_keys:
             expected = ns_to_steps(self.cmd_ns, dt_ps)
@@ -399,7 +411,7 @@ class SimulationConfig:
         if yaml is None:
             raise RuntimeError("pyyaml is not installed. Install with: pip install pyyaml")
         data = self.as_dict()
-        data["dt"] = 0.002
+        data["dt"] = float(self.dt or 0.002)
         return yaml.safe_dump(data, sort_keys=False)
 
     def to_json(self, indent: int = 2) -> str:
