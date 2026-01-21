@@ -132,7 +132,7 @@ def cmd_pipeline(ns):
     run_equil_and_prod(cfg)
     if ns.plot:
         def _has_reweight_metrics(files):
-            for path in files[:3]:
+            for path in files[:5]:
                 try:
                     payload = json.loads(path.read_text(encoding="utf-8"))
                 except Exception:
@@ -143,45 +143,56 @@ def cmd_pipeline(ns):
                     return True
             return False
 
-        out_root = Path(cfg.outdir)
-        bias_plans = sorted(out_root.glob("bias_plan_cycle_*.json"))
-        if not bias_plans:
-            print("[PLOT] skipped controller_diagnostics.svg: no bias_plan_cycle_*.json found")
-            print("[PLOT] skipped reweighting_diagnostics.svg: no bias_plan_cycle_*.json found")
-            return
-
-        if ns.plot_controller:
+        def _run_plot(name: str, script: Path, out_path: Path):
             try:
                 result = subprocess.run(
-                    [sys.executable, str(ROOT / "scripts" / "plot_controller_diagnostics.py"),
-                     "--run", str(out_root),
-                     "--out", str(out_root / "controller_diagnostics.svg")],
+                    [sys.executable, str(script), "--run", str(out_root), "--out", str(out_path)],
                     check=False,
                 )
                 if result.returncode == 0:
-                    print(f"[PLOT] wrote {out_root / 'controller_diagnostics.svg'}")
+                    print(f"[PLOT] Wrote {out_path.name}")
                 else:
-                    print("[PLOT] skipped controller_diagnostics.svg: plotting failed")
+                    print(f"[PLOT] Failed {name}: exit code {result.returncode}")
             except Exception as exc:
-                print(f"[PLOT] skipped controller_diagnostics.svg: {exc}")
+                print(f"[PLOT] Failed {name}: {exc}")
+
+        out_root = Path(cfg.outdir)
+        bias_plans = sorted(out_root.glob("bias_plan_cycle_*.json"))
+        has_bias_plans = bool(bias_plans)
+
+        if ns.plot_controller:
+            if not has_bias_plans:
+                print("[PLOT] Skipped controller_diagnostics.svg (reason: no bias_plan_cycle_*.json found)")
+            else:
+                _run_plot(
+                    "controller_diagnostics.svg",
+                    ROOT / "scripts" / "plot_controller_diagnostics.py",
+                    out_root / "controller_diagnostics.svg",
+                )
 
         if ns.plot_reweight:
-            if not _has_reweight_metrics(bias_plans):
-                print("[PLOT] No reweight metrics found; skipping reweighting_diagnostics.svg")
+            if not has_bias_plans:
+                print("[PLOT] Skipped reweighting_diagnostics.svg (reason: no bias_plan_cycle_*.json found)")
+            elif not _has_reweight_metrics(bias_plans):
+                print("[PLOT] Skipped reweighting_diagnostics.svg (reason: no reweight metrics found)")
             else:
-                try:
-                    result = subprocess.run(
-                        [sys.executable, str(ROOT / "scripts" / "plot_reweighting_diagnostics.py"),
-                         "--run", str(out_root),
-                         "--out", str(out_root / "reweighting_diagnostics.svg")],
-                        check=False,
-                    )
-                    if result.returncode == 0:
-                        print(f"[PLOT] wrote {out_root / 'reweighting_diagnostics.svg'}")
-                    else:
-                        print("[PLOT] skipped reweighting_diagnostics.svg: plotting failed")
-                except Exception as exc:
-                    print(f"[PLOT] skipped reweighting_diagnostics.svg: {exc}")
+                _run_plot(
+                    "reweighting_diagnostics.svg",
+                    ROOT / "scripts" / "plot_reweighting_diagnostics.py",
+                    out_root / "reweighting_diagnostics.svg",
+                )
+
+        if ns.plot_ml:
+            metrics_path = out_root / "metrics.json"
+            summary_path = out_root / "model_summary.json"
+            if not metrics_path.exists() and not summary_path.exists():
+                print("[PLOT] Skipped ml_calibration_diagnostics.svg (reason: metrics.json not found)")
+            else:
+                _run_plot(
+                    "ml_calibration_diagnostics.svg",
+                    ROOT / "scripts" / "plot_ml_calibration_diagnostics.py",
+                    out_root / "ml_calibration_diagnostics.svg",
+                )
 
 
 
@@ -329,6 +340,7 @@ def build_parser():
     plot_group.add_argument("--no-plot", dest="plot", action="store_false")
     p.add_argument("--plot-reweight", dest="plot_reweight", action="store_true", default=True)
     p.add_argument("--plot-controller", dest="plot_controller", action="store_true", default=True)
+    p.add_argument("--plot-ml", dest="plot_ml", action="store_true", default=True)
     p.set_defaults(func=cmd_pipeline)
     p = sub.add_parser("bench_alanine", help="Generate alanine dipeptide benchmarks with tleap")
     p.add_argument("--out", default="benchmarks/alanine")
