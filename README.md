@@ -29,11 +29,11 @@ python cli.py make_configs --out configs
 
 Example config files produced:
 
-- `configs/config-explicit-5ns.yaml`
-- `configs/config-implicit-5ns.yaml`
+- `configs/config-explicit-cmd5ns-equil5ns-prod5ns.yml`
+- `configs/config-implicit-cmd5ns-equil5ns-prod5ns.yml`
 
 Create a working config by copying one of the generated files (for example,
-`configs/config-explicit-5ns.yaml`) to `config.yml` and editing paths, GPU settings,
+`configs/config-explicit-cmd5ns-equil5ns-prod5ns.yml`) to `config.yml` and editing paths, GPU settings,
 and run lengths as needed before invoking the pipeline.
 
 ### CLI commands
