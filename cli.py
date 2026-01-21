@@ -4,7 +4,9 @@ cli.py — One-entry command line for paddle
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent
@@ -104,23 +106,57 @@ def cmd_pipeline(ns):
         print("[4/5] TRAIN skipped.")
     print("[5/5] EQUIL+PROD…"); run_equil_and_prod(cfg)
     if ns.plot:
-        try:
-            from pathlib import Path
-            import subprocess
-            out_root = Path(cfg.outdir)
-            # Only run if at least one bias_plan file exists
-            if any(out_root.glob("bias_plan_cycle_*.json")):
-                subprocess.run(
-                    [sys.executable, str(Path("scripts") / "plot_controller_diagnostics.py"),
+        def _has_reweight_metrics(files):
+            for path in files[:3]:
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                metrics = payload.get("metrics", {})
+                reweight = metrics.get("reweight", {})
+                if "ess_frac" in reweight:
+                    return True
+            return False
+
+        out_root = Path(cfg.outdir)
+        bias_plans = sorted(out_root.glob("bias_plan_cycle_*.json"))
+        if not bias_plans:
+            print("[PLOT] skipped controller_diagnostics.svg: no bias_plan_cycle_*.json found")
+            print("[PLOT] skipped reweighting_diagnostics.svg: no bias_plan_cycle_*.json found")
+            return
+
+        if ns.plot_controller:
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts" / "plot_controller_diagnostics.py"),
                      "--run", str(out_root),
                      "--out", str(out_root / "controller_diagnostics.svg")],
-                    check=False
+                    check=False,
                 )
-                print(f"[PLOT] Wrote: {out_root / 'controller_diagnostics.svg'}")
+                if result.returncode == 0:
+                    print(f"[PLOT] wrote {out_root / 'controller_diagnostics.svg'}")
+                else:
+                    print("[PLOT] skipped controller_diagnostics.svg: plotting failed")
+            except Exception as exc:
+                print(f"[PLOT] skipped controller_diagnostics.svg: {exc}")
+
+        if ns.plot_reweight:
+            if not _has_reweight_metrics(bias_plans):
+                print("[PLOT] No reweight metrics found; skipping reweighting_diagnostics.svg")
             else:
-                print("[PLOT] No bias_plan_cycle_*.json found; skipping plots.")
-        except Exception as e:
-            print(f"[PLOT] Plot generation failed: {e}")
+                try:
+                    result = subprocess.run(
+                        [sys.executable, str(ROOT / "scripts" / "plot_reweighting_diagnostics.py"),
+                         "--run", str(out_root),
+                         "--out", str(out_root / "reweighting_diagnostics.svg")],
+                        check=False,
+                    )
+                    if result.returncode == 0:
+                        print(f"[PLOT] wrote {out_root / 'reweighting_diagnostics.svg'}")
+                    else:
+                        print("[PLOT] skipped reweighting_diagnostics.svg: plotting failed")
+                except Exception as exc:
+                    print(f"[PLOT] skipped reweighting_diagnostics.svg: {exc}")
 
 
 def cmd_bench_alanine(ns):
@@ -205,6 +241,8 @@ def build_parser():
     plot_group = p.add_mutually_exclusive_group()
     plot_group.add_argument("--plot", dest="plot", action="store_true", default=True)
     plot_group.add_argument("--no-plot", dest="plot", action="store_false")
+    p.add_argument("--plot-reweight", dest="plot_reweight", action="store_true", default=True)
+    p.add_argument("--plot-controller", dest="plot_controller", action="store_true", default=True)
     p.set_defaults(func=cmd_pipeline)
     p = sub.add_parser("bench_alanine", help="Generate alanine dipeptide benchmarks with tleap")
     p.add_argument("--out", default="benchmarks/alanine")
