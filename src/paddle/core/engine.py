@@ -6,10 +6,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-from inspect import signature
 import os
 
 from openmm import Platform, unit
+import openmm as mm
 from openmm.app import AmberInpcrdFile, AmberPrmtopFile, Simulation
 
 
@@ -84,9 +84,6 @@ def build_system(
             rigidWater=rigid_water,
             ewaldErrorTolerance=ewald_error_tolerance,
         )
-        create_system_sig = signature(prmtop.createSystem)
-        if "useDispersionCorrection" in create_system_sig.parameters:
-            create_system_kwargs["useDispersionCorrection"] = use_dispersion_correction
         system = prmtop.createSystem(**create_system_kwargs)
     else:
         from openmm.app import GBn2
@@ -96,7 +93,24 @@ def build_system(
             soluteDielectric=1.0,
             solventDielectric=78.5,
         )
+    for force in system.getForces():
+        if isinstance(force, mm.NonbondedForce):
+            force.setUseDispersionCorrection(bool(use_dispersion_correction))
     return prmtop, system
+
+
+def assign_force_groups(system) -> None:
+    for force in system.getForces():
+        if isinstance(force, mm.HarmonicBondForce):
+            force.setForceGroup(1)
+        elif isinstance(force, mm.HarmonicAngleForce):
+            force.setForceGroup(2)
+        elif isinstance(force, (mm.PeriodicTorsionForce, mm.RBTorsionForce, mm.CMAPTorsionForce, mm.CustomTorsionForce)):
+            force.setForceGroup(3)
+        elif isinstance(force, mm.NonbondedForce):
+            force.setForceGroup(4)
+        else:
+            force.setForceGroup(0)
 
 
 def create_simulation(parm_file: str, crd_file: str, integrator, options: EngineOptions):
@@ -119,6 +133,8 @@ def create_simulation(parm_file: str, crd_file: str, integrator, options: Engine
             )
         )
         print("Explicit solvent detected → MonteCarloBarostat enabled")
+
+    assign_force_groups(system)
 
     plat, props = get_platform(
         options.platform_name,

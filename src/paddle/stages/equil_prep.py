@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from openmm import XmlSerializer, unit
-import openmm as mm
 
 from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation, log_simulation_start, minimize_and_initialize
@@ -28,19 +27,6 @@ def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
         use_dispersion_correction=cfg.useDispersionCorrection,
         rigid_water=cfg.rigidWater,
     )
-
-def _assign_force_groups(sim) -> None:
-    for force in sim.system.getForces():
-        if isinstance(force, mm.HarmonicBondForce):
-            force.setForceGroup(1)
-        elif isinstance(force, mm.HarmonicAngleForce):
-            force.setForceGroup(2)
-        elif isinstance(force, (mm.PeriodicTorsionForce, mm.CustomTorsionForce, mm.RBTorsionForce, mm.CMAPTorsionForce)):
-            force.setForceGroup(3)
-        elif isinstance(force, mm.NonbondedForce):
-            force.setForceGroup(4)
-        else:
-            force.setForceGroup(0)
 
 def _load_cmd_checkpoint_if_any(sim, outdir: Path) -> bool:
     rst = outdir / "cmd.rst"
@@ -82,7 +68,6 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
         ewald_error_tolerance=opts.ewald_error_tolerance,
     )
 
-    _assign_force_groups(sim)
     loaded = _load_cmd_checkpoint_if_any(sim, outdir)
     if not loaded:
         minimize_and_initialize(sim, cfg.temperature, set_velocities=True)
@@ -102,7 +87,21 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
 
     for cyc in range(start_cyc, end_cyc):
         csv_path = prepdir / f"equilprep-cycle{cyc:02d}.csv"
-        logger = CSVLogger(csv_path, ["step", "Etot_kJ", "Edih_kJ", "T_K"], compress=True)
+        logger = CSVLogger(
+            csv_path,
+            [
+                "step",
+                "Etot_kJ",
+                "Edih_kJ",
+                "E_potential_kJ",
+                "E_bond_kJ",
+                "E_angle_kJ",
+                "E_dihedral_kJ",
+                "E_nonbonded_kJ",
+                "T_K",
+            ],
+            compress=cfg.compress_logs,
+        )
 
         steps = cfg.ntebpreppercyc
         interval = max(1, int(cfg.ebprepRestartFreq))
@@ -111,14 +110,18 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
         edih_zero_count = 0
         for i in range(n_reports):
             sim.step(interval)
-            Etot = sim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-            Edih = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            state_total = sim.context.getState(getEnergy=True)
+            Etot = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            E_bond = sim.context.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            E_angle = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            E_dihedral = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            E_nonbonded = sim.context.getState(getEnergy=True, groups={4}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            Edih = E_dihedral
             if i < 10 and Edih == 0.0:
                 edih_zero_count += 1
                 if i == 9 and edih_zero_count == 10:
                     print("WARNING: Edih_kJ is zero; check torsion forces / force groups.")
-            state = sim.context.getState(getEnergy=True)
-            K_kJ = state.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole)
+            K_kJ = state_total.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole)
             N = sim.system.getNumParticles()
             num_constraints = sim.system.getNumConstraints()  # counts constrained DOFs (e.g., HBonds)
             dof = max(1, 3 * N - num_constraints - 3)        # remove 3 for translation
@@ -130,6 +133,11 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
                 "step": (i + 1) * interval,
                 "Etot_kJ": Etot,
                 "Edih_kJ": Edih,
+                "E_potential_kJ": Etot,
+                "E_bond_kJ": E_bond,
+                "E_angle_kJ": E_angle,
+                "E_dihedral_kJ": E_dihedral,
+                "E_nonbonded_kJ": E_nonbonded,
                 "T_K": T,
             })
 
