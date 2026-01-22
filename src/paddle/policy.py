@@ -120,6 +120,7 @@ def freeze_bias_update(cfg, metrics: Mapping[str, object]) -> bool:
     skew = _metric(metrics, "skew", "skewness", "skew_proxy", "skewness_proxy")
     kurtosis = _metric(metrics, "kurtosis", "excess_kurtosis", "kurtosis_proxy", "excess_kurtosis_proxy")
     tail = _metric(metrics, "tail_risk", "tail_risk_proxy")
+    delta_tail = _metric(metrics, "deltaV_tail_risk")
     if skew is None or kurtosis is None or tail is None:
         energy_freeze = True
     else:
@@ -128,6 +129,8 @@ def freeze_bias_update(cfg, metrics: Mapping[str, object]) -> bool:
             or abs(kurtosis) >= kurtosis_freeze
             or abs(tail) >= tail_freeze
         )
+    if delta_tail is not None:
+        energy_freeze = energy_freeze or abs(delta_tail) >= tail_freeze
 
     latent_skew = _metric(metrics, "latent_skewness", "latent_skew")
     latent_kurtosis = _metric(metrics, "latent_excess_kurtosis", "latent_kurtosis")
@@ -214,6 +217,25 @@ def _adjust_k0(
         if _uncertainty_is_low(model_summary):
             return k0 + _K0_UP_STEP
     return k0
+
+def _apply_k_bounds(
+    k0: float,
+    vmin: float,
+    vmax: float,
+    k_min: Optional[float],
+    k_max: Optional[float],
+    k0_min: float,
+    k0_max: float,
+) -> float:
+    if k_min is None and k_max is None:
+        return k0
+    span = max(vmax - vmin, _EPS)
+    k_val = k0 / span
+    if k_min is not None:
+        k_val = max(float(k_min), k_val)
+    if k_max is not None:
+        k_val = min(float(k_max), k_val)
+    return _clamp(k_val * span, k0_min, k0_max)
 
 
 def propose_boost_params(
@@ -330,6 +352,15 @@ def propose_boost_params(
 
     k0D = _apply_sigma0_limit(k0D, vmin_d, vmax_d, vavg_d, vstd_d, getattr(cfg, "sigma0D", None))
     k0P = _apply_sigma0_limit(k0P, vmin_p, vmax_p, vavg_p, vstd_p, getattr(cfg, "sigma0P", None))
+    k0D = _apply_k_bounds(k0D, vmin_d, vmax_d, k_min, k_max, k0_min, k0_max)
+    k0P = _apply_k_bounds(k0P, vmin_p, vmax_p, k_min, k_max, k0_min, k0_max)
+
+    deltaV_std = _metric(metrics, "deltaV_std")
+    deltaV_std_max = _get_value(cfg, "deltaV_std_max")
+    deltaV_damp_factor = float(getattr(cfg, "deltaV_damp_factor", 0.5))
+    if deltaV_std_max is not None and deltaV_std is not None and deltaV_std > float(deltaV_std_max):
+        k0D = _clamp(k0D * deltaV_damp_factor, k0_min, k0_max)
+        k0P = _clamp(k0P * deltaV_damp_factor, k0_min, k0_max)
 
     return BoostParams(
         VminD=vmin_d,

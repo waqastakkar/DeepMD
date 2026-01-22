@@ -110,7 +110,7 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
         edih_zero_count = 0
         for i in range(n_reports):
             sim.step(interval)
-            state_total = sim.context.getState(getEnergy=True)
+            state_total = sim.context.getState(getEnergy=True, getVelocities=True, groups={1, 2, 3, 4})
             Etot = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
             E_bond = sim.context.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
             E_angle = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)

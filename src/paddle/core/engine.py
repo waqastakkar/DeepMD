@@ -6,7 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-from inspect import signature
 import os
 
 from openmm import Platform, unit
@@ -85,9 +84,6 @@ def build_system(
             rigidWater=rigid_water,
             ewaldErrorTolerance=ewald_error_tolerance,
         )
-        create_system_sig = signature(prmtop.createSystem)
-        if "useDispersionCorrection" in create_system_sig.parameters:
-            create_system_kwargs["useDispersionCorrection"] = use_dispersion_correction
         system = prmtop.createSystem(**create_system_kwargs)
     else:
         from openmm.app import GBn2
@@ -97,6 +93,9 @@ def build_system(
             soluteDielectric=1.0,
             solventDielectric=78.5,
         )
+    for force in system.getForces():
+        if isinstance(force, mm.NonbondedForce):
+            force.setUseDispersionCorrection(bool(use_dispersion_correction))
     return prmtop, system
 
 
