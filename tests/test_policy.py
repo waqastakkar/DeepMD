@@ -30,7 +30,7 @@ def _make_restart(k0D: float, k0P: float) -> RestartRecord:
 
 
 def test_policy_deterministic_mapping():
-    cfg = SimulationConfig(k0_initial=0.5, k0_min=0.1, k0_max=0.9)
+    cfg = SimulationConfig(k0_initial=0.5, k0_min=0.1, k0_max=0.9, controller_enabled=False)
     cycle_stats = {"VminD": 0.0, "VmaxD": 10.0, "VminP": 5.0, "VmaxP": 15.0}
     metrics = {"skew": 0.05, "kurtosis": 0.05}
     model_summary = {"uncertainty": 0.05}
@@ -45,7 +45,7 @@ def test_policy_deterministic_mapping():
 
 
 def test_policy_clamps_and_sanitizes_bounds():
-    cfg = SimulationConfig(k0_initial=0.58, k0_min=0.1, k0_max=0.6)
+    cfg = SimulationConfig(k0_initial=0.58, k0_min=0.1, k0_max=0.6, controller_enabled=False)
     cycle_stats = {"VminD": 5.0, "VmaxD": 1.0, "VminP": 2.0, "VmaxP": 1.0}
     metrics = {"skew": 0.0, "kurtosis": 0.0}
     model_summary = {"uncertainty": 0.0}
@@ -60,7 +60,7 @@ def test_policy_clamps_and_sanitizes_bounds():
 
 
 def test_policy_reduces_on_high_kurtosis():
-    cfg = SimulationConfig(k0_initial=0.5, k0_min=0.1, k0_max=0.9)
+    cfg = SimulationConfig(k0_initial=0.5, k0_min=0.1, k0_max=0.9, controller_enabled=False)
     last_restart = _make_restart(0.4, 0.45)
     cycle_stats = {"VminD": 0.0, "VmaxD": 10.0, "VminP": 5.0, "VmaxP": 15.0}
     metrics = {"skew": 0.0, "kurtosis": 2.0}
@@ -69,3 +69,15 @@ def test_policy_reduces_on_high_kurtosis():
 
     assert params.k0D < last_restart.k0D
     assert params.k0P < last_restart.k0P
+
+
+def test_policy_deltaV_std_max_default_applies_damping():
+    cfg = SimulationConfig(k0_initial=0.5, k0_min=0.1, k0_max=0.9, deltaV_std_max=None)
+    cycle_stats = {"VminD": 0.0, "VmaxD": 10.0, "VminP": 5.0, "VmaxP": 15.0}
+    metrics = {"skew": 0.0, "kurtosis": 0.0, "deltaV_std": 20.0}
+    model_summary = {"uncertainty": 0.0}
+
+    params = propose_boost_params(cfg, cycle_stats, None, metrics, model_summary=model_summary)
+
+    assert params.k0D == pytest.approx(0.25)
+    assert params.k0P == pytest.approx(0.25)

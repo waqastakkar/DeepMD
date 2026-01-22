@@ -77,6 +77,16 @@ outdir: out_gamd
 | `gaussian_tail_risk_good` | Tail-risk threshold |
 | `gaussian_*_freeze` | Freeze thresholds for controller |
 | `controller_enabled` | Enable/disable adaptive GaMD control |
+| `deltaV_std_max` | Max ΔV standard deviation before damping k0 (defaults by boost mode) |
+| `deltaV_damp_factor` | Multiplicative k0 damp factor when ΔV std exceeds threshold |
+
+Example GaMD control snippet:
+
+```yaml
+controller_enabled: true
+deltaV_std_max: 10.0  # default for dual boost (6.0 for dihedral-only mode)
+deltaV_damp_factor: 0.5
+```
 
 ## GPU and OpenMM platform
 
