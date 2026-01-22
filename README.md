@@ -1,306 +1,312 @@
-# DeepMD
+# DeepMD: GaMD–GNN Molecular Dynamics Pipeline
 
-Closed-loop Gaussian accelerated MD workflow with ML-assisted control.
+A GPU-accelerated, CLI-driven workflow for explicit-solvent OpenMM simulations with Gaussian accelerated MD (GaMD), energy decomposition, ML-ready feature extraction, graph neural network (GNN) training, and residue-level saliency mapping.
 
-## Project summary
+# Overview
 
-Repository: `DeepMD`. This document summarizes the pipeline and implemented
-functionality for reviewers.
+DeepMD orchestrates a complete pipeline from classical molecular dynamics (MD) through GaMD-accelerated sampling, feature extraction, GNN modeling, and saliency analysis. The workflow follows:
 
-## Quickstart
+MD → GaMD → Feature extraction → GNN training → Saliency mapping.
 
-<!-- BEGIN GENERATED QUICKSTART -->
-Install the package with your preferred environment manager. Ensure that Python can import
-the package and that all simulation dependencies are available.
+Each stage is modular, reproducible, and designed for high-throughput GPU execution using OpenMM, with downstream ML components implemented in TensorFlow.
 
-CLI entry point: run via `python cli.py`.
+# Key Features
 
-Minimal pipeline invocation (full workflow):
+- OpenMM explicit-solvent MD (Amber prmtop/inpcrd; recommended ff19SB + OPC workflows)
+- GaMD acceleration with dual-boost integrators
+- Energy decomposition via force-group mapping (bond/angle/dihedral/nonbonded)
+- ML-ready feature extraction from equilibration logs
+- GNN-based residue-level saliency mapping
+- GPU acceleration with CUDA and CPU fallback
+- Reproducibility tooling and CI-aware outputs
+
+# Installation
+
+## Conda environment (recommended)
 
 ```bash
-python cli.py pipeline --config config.yaml --out outdir
+conda create -n deepmd python=3.10 -y
+conda activate deepmd
+conda install -c conda-forge openmm cudatoolkit -y
+pip install -e .
 ```
 
-Generate example configuration YAMLs (writes explicit/implicit configs):
+If you prefer pip-only installation (CPU-only OpenMM), install the requirements:
 
 ```bash
-python cli.py make_configs --out configs
+pip install -r requirements.txt
+pip install -e .
 ```
 
-Example config files produced:
+## CUDA requirements
 
-- `configs/config-explicit-cmd5ns-equil5ns-prod5ns.yml`
-- `configs/config-implicit-cmd5ns-equil5ns-prod5ns.yml`
+- NVIDIA GPU with a CUDA-capable driver.
+- OpenMM built with CUDA support (conda-forge `openmm` package supports CUDA). 
+- To target a specific device, set `cuda_device_index` in the YAML config and/or use `CUDA_VISIBLE_DEVICES`.
 
-Create a working config by copying one of the generated files (for example,
-`configs/config-explicit-cmd5ns-equil5ns-prod5ns.yml`) to `config.yml` and editing paths, GPU settings,
-and run lengths as needed before invoking the pipeline.
+## CPU fallback
 
-### CLI commands
+Set `platform: CPU` in your YAML config (and `require_gpu: false`). The pipeline will run on CPU with reduced performance.
 
-- `bench_alanine` — Generate alanine dipeptide benchmarks with tleap
-- `cmd` — Run CMD stage
-- `data` — Build dataset from prep logs
-- `equil_prod` — Run equilibration + production
-- `make_configs` — Generate example YAML configs for explicit/implicit CMD runs
-- `pipeline` — Run full pipeline
-- `prep` — Run equilibration-prep stage
-- `train` — Train ensemble model
+# Quick Start
 
-### Helpful CLI examples
+Below is a minimal end-to-end example using the built-in alanine dipeptide benchmark and the provided GNN example dataset.
 
-Run just the CMD stage:
+## 1) Build a test system (ff19SB + OPC)
+
+```bash
+python cli.py bench_alanine --out benchmarks/alanine
+```
+
+The command creates explicit/implicit Amber inputs and a ready-to-run `config.yml` in each output directory.
+
+## 2) Run a short CMD stage
+
+```bash
+python cli.py cmd --config benchmarks/alanine/explicit/config.yml --out out_cmd
+```
+
+## 3) Run GaMD equilibration + production
+
+```bash
+python cli.py equil_prod --config benchmarks/alanine/explicit/config.yml --out out_gamd
+```
+
+## 4) Generate ML features from equilibration logs
+
+```bash
+python cli.py prep --config benchmarks/alanine/explicit/config.yml --out out_prep
+python cli.py data --prep out_prep/prep --out out_data
+```
+
+## 5) Train the GNN and generate saliency scores
+
+```bash
+python scripts/gnn_example.py --out examples
+python scripts/gnn_pipeline.py --npz examples/alanine_gamd.npz --out out_gnn
+```
+
+## 6) Summarize saliency
+
+```bash
+python scripts/gnn_visualize.py --importance out_gnn/importance.csv --out out_gnn/saliency_report.txt
+```
+
+# Pipeline Architecture
+
+For additional diagrams and rationale, see `docs/architecture.md`.
+
+## 1) MD Setup
+**Inputs:** Amber `parm7` + `rst7`, YAML configuration.
+**Outputs:** Initialized OpenMM `Simulation` with PME (explicit) or GBn2 (implicit).
+
+## 2) CMD (Conventional MD)
+**Inputs:** MD setup + integrator.
+**Outputs:** `cmd.dcd`, `cmd-state.log`, `md.log`, `cmd.rst`, `prep_*.json` summaries.
+
+## 3) Heating
+**Inputs:** minimized coordinates.
+**Outputs:** temperature ramp metadata in `prep_heating.json`.
+
+## 4) Density Equilibration (NPT)
+**Inputs:** explicit-solvent system with Monte Carlo barostat.
+**Outputs:** `prep_density.json` summary and stabilized density.
+
+## 5) GaMD Equilibration
+**Inputs:** CMD checkpoint or equilibrated state.
+**Outputs:** `equil/*.dcd`, `equil/*.log`, `gamd-diagnostics-cycle*.csv`, `gamd-ml-cycle*.csv`, `bias_plan_cycle_*.json`, `gamd-restart.dat`.
+
+## 6) GaMD Production
+**Inputs:** GaMD restart state.
+**Outputs:** `prod/*.dcd`, `prod/*.log`, `gamd-diagnostics-cycle*.csv`, `gamd-ml-cycle*.csv`, `metrics.jsonl`.
+
+## 7) Feature Extraction
+**Inputs:** `prep/equilprep-cycle*.csv(.gz)` logs.
+**Outputs:** `windows.npz`, `splits.json`, `stats.json` for ML training.
+
+## 8) Dataset Construction
+**Inputs:** Equilibration features + windowing configuration.
+**Outputs:** normalized feature windows and train/val/test splits.
+
+## 9) GNN Training
+**Inputs:** Residue-level `.npz` with node features and positions (see `docs/gnn.md`).
+**Outputs:** `gamd_gnn_model.keras`, saliency CSV/JSON.
+
+## 10) Saliency Mapping
+**Inputs:** trained GNN model + residue features.
+**Outputs:** `importance.csv`, `importance.csv.json`, optional edge-weight exports.
+
+### Directory layout (typical)
+
+```
+out_gamd/
+├── cmd.dcd
+├── cmd.rst
+├── cmd-state.log
+├── md.log
+├── equil/
+│   ├── equil-cycle00.dcd
+│   ├── equil-cycle00.log
+│   ├── gamd-diagnostics-cycle00.csv
+│   └── gamd-ml-cycle00.csv
+├── prod/
+│   ├── prod-cycle00.dcd
+│   ├── prod-cycle00.log
+│   ├── gamd-diagnostics-cycle00.csv
+│   └── gamd-ml-cycle00.csv
+├── bias_plan_cycle_0.json
+├── gamd-restart.dat
+├── metrics.jsonl
+└── prep_density.json
+```
+
+# Configuration System
+
+Configurations are YAML/JSON/TOML files parsed into `SimulationConfig`. See `docs/config.md` for a full reference.
+
+Key YAML sections include:
+
+- **System I/O:** `parmFile`, `crdFile`, `simType`, `outdir`
+- **MD timing:** `dt`, `cmd_ns`, `equil_ns_per_cycle`, `prod_ns_per_cycle`, reporting intervals
+- **Thermostat/barostat:** `temperature`, `pressure_atm`, `barostat_interval`
+- **GaMD parameters:** `refEP_factor`, `refED_factor`, `k0_initial`, `k0_min`, `k0_max`
+- **GPU options:** `platform`, `precision`, `cuda_device_index`, `cuda_precision`, `require_gpu`
+- **Control + diagnostics:** Gaussianity thresholds, reweighting diagnostics, closed-loop controller toggles
+
+# GaMD Theory (Concise but correct)
+
+GaMD adds a harmonic boost potential to smooth the energy landscape when the system’s potential energy falls below a threshold energy **E**. The boost is:
+
+ΔV = ½ k (E − V)^2 for V < E, and ΔV = 0 for V ≥ E.
+
+The workflow supports:
+
+- **Dihedral boost** (dihedral energy only)
+- **Total boost** (total potential energy)
+- **Dual boost** (simultaneous dihedral + total boosts)
+
+The threshold **E** and force constant **k** are adaptively chosen from running energy statistics, with safeguards to preserve near-Gaussian boost distributions for accurate reweighting. Reweighting is supported through cumulant/entropy diagnostics to recover unbiased free-energy estimates.
+
+# Feature Extraction
+
+Feature extraction operates on equilibration-prep logs and yields ML-ready time windows. Reported quantities include:
+
+- **Energy decomposition:** bond, angle, dihedral, nonbonded, total potential energy (force-group mapping)
+- **Thermodynamic observables:** temperature, density
+- **Derived statistics:** mean/std/min/max per window
+
+Outputs are serialized to `windows.npz` (features + targets), `splits.json` (train/val/test indices), and `stats.json` (normalization metadata).
+
+# GNN Model
+
+The GNN pipeline constructs residue-level graphs per frame using contact edges, optional physical interactions (H-bonds, salt bridges, covariance), and distance/direction edge features. The model combines:
+
+- **Graph encoder:** SE(3)-aware message passing + multi-head graph attention
+- **Temporal encoder:** convolutional layers + multi-head self-attention across trajectory windows
+- **Multi-task heads:** ΔV regression, state classification, RMSD, Rg, and latent projection
+
+Training uses sliding windows and is driven by the CLI in `scripts/gnn_pipeline.py`.
+
+# Saliency Mapping
+
+Residue-level saliency is computed using gradient-based methods and attention-derived attributions:
+
+- **Gradient attribution:** saliency from ∂output/∂node features
+- **Integrated gradients:** baseline-to-input path integral
+- **Attention rollout:** aggregation across GAT layers
+- **GraphCAM:** gradient-weighted node embedding projection
+
+Outputs include `importance.csv` and a JSON metadata sidecar, plus optional edge-weight exports for network visualization.
+
+# Example Commands
+
+## Full CLI command list
 
 ```bash
 python cli.py cmd --config config.yml --out out_cmd
+python cli.py prep --config config.yml --out out_prep
+python cli.py data --prep out_prep/prep --out out_data
+python cli.py train --data out_data/windows.npz --splits out_data/splits.json --out out_models
+python cli.py equil_prod --config config.yml --out out_gamd
+python cli.py pipeline --config config.yml --out out_pipeline
+python cli.py make_configs --out configs
+python cli.py bench_alanine --out benchmarks/alanine
 ```
 
-Run equilibration-prep and then build a training dataset:
+## Typical workflows
 
+**Short test run**
+```bash
+python cli.py make_configs --out configs
+python cli.py cmd --config configs/config-explicit-cmd5ns-equil5ns-prod5ns.yml --out out_cmd
+```
+
+**Production GaMD run**
+```bash
+python cli.py equil_prod --config config.yml --out out_gamd
+```
+
+**Feature generation**
 ```bash
 python cli.py prep --config config.yml --out out_prep
 python cli.py data --prep out_prep/prep --out out_data
 ```
 
-Train an ensemble model from a prepared dataset:
-
+**GNN training**
 ```bash
-python cli.py train --data out_data/windows.npz --splits out_data/splits.json --out out_models
+python scripts/gnn_pipeline.py --npz path/to/residue_features.npz --out out_gnn --epochs 25 --sequence 8 --batch 4
 ```
 
-Run equilibration + production only:
-
+**Saliency visualization**
 ```bash
-python cli.py equil_prod --config config.yml --out out_prod
+python scripts/gnn_visualize.py --importance out_gnn/importance.csv --out out_gnn/saliency_report.txt
 ```
 
-Generate alanine dipeptide benchmarks:
+# Outputs
 
-```bash
-python cli.py bench_alanine --out benchmarks/alanine
+- **Trajectories:** `cmd.dcd`, `equil/*.dcd`, `prod/*.dcd`
+- **Logs:** `cmd-state.log`, `md.log`, `equil/*.log`, `prod/*.log`
+- **GaMD diagnostics:** `gamd-diagnostics-cycle*.csv`, `gamd-ml-cycle*.csv`, `bias_plan_cycle_*.json`, `gamd-restart.dat`
+- **Feature tables:** `prep/equilprep-cycle*.csv(.gz)`, `windows.npz`, `stats.json`
+- **Models:** `gamd_gnn_model.keras`, ensemble model outputs, checkpoints
+- **Figures:** controller and reweighting diagnostics (optional)
+- **Saliency maps:** `importance.csv` + JSON metadata
+
+# Performance Guidelines
+
+- **Expected throughput:** system-dependent; explicit solvent with GaMD typically achieves tens of ns/day on modern GPUs.
+- **GPU vs CPU:** CUDA provides order-of-magnitude speedups for MD and GNN training.
+- **I/O optimization:** increase report intervals for high-throughput runs; compress CSV logs with `compress_logs: true`.
+- **Reporting frequencies:** balance temporal resolution with storage (e.g., `cmdRestartFreq`, `ebRestartFreq`, `prodRestartFreq`).
+
+# Troubleshooting
+
+- **GPU not detected:** verify `platform: CUDA`, OpenMM CUDA install, and `CUDA_VISIBLE_DEVICES`.
+- **Barostat not active:** ensure explicit solvent (`simType: protein.explicit`) and `barostat_interval` > 0.
+- **Edih_kJ or E_dihedral_kJ zero:** confirm torsion force groups exist in topology and force-group mapping is enabled.
+- **CI failure:** ensure OpenMM/TensorFlow versions match your environment manifest.
+- **Missing dependencies:** `pip install -r requirements.txt` and verify `pyyaml` for YAML configs.
+
+# Citation
+
+If you use DeepMD in your work, please cite:
+
+> DeepMD: Closed-loop GaMD with ML-assisted analysis. (2025).
+
+**BibTeX stub**
+
+```bibtex
+@misc{deepmd2025,
+  title        = {DeepMD: Closed-loop GaMD with ML-assisted analysis},
+  author       = {DeepMD Development Team},
+  year         = {2025},
+  howpublished = {\url{https://github.com/your-org/DeepMD}},
+}
 ```
-<!-- END GENERATED QUICKSTART -->
 
-### Ablation comparison (not part of the pipeline)
+Additional documentation:
 
-The ablation plot is generated from the bias-plan logs after you complete two
-pipeline runs (a controlled run and a baseline run). Run the plot script directly:
-
-```bash
-python scripts/plot_ablation_comparison.py \
-  --controlled out_controlled \
-  --baseline out_baseline \
-  --out ablation_comparison.svg
-```
-
-## Pipeline stages
-
-The pipeline is organized into stage modules. Each module lists its purpose and public entry
-points for reviewers.
-
-### cmd
-
-Conventional MD (CMD) stage for PADDLE.
-
-Key functions/classes:
-- `run_cmd(cfg: SimulationConfig)`
-
-### equil_prep
-
-Equilibration preparation (collect energy series).
-
-Key functions/classes:
-- `run_equil_prep(cfg: SimulationConfig)`
-
-### equil_prod
-
-Equilibration (dual-boost) + Production.
-
-Key functions/classes:
-- `run_equil_and_prod(cfg: SimulationConfig)`
-
-### pmf
-
-Estimate 1D PMF from an energy-like series (demo).
-
-Key functions/classes:
-- `pmf_from_series(series: np.ndarray, bins: int = 50)`
-- `save_pmf_json(path: str | Path, x: np.ndarray, pmf: np.ndarray)`
-
-### report
-
-Logging utilities for PADDLE.
-
-Key functions/classes:
-- `timestamp()`
-- `ensure_dir(p: Path)`
-- `class CSVLogger`
-- `write_json(data: Mapping[str, object], path: Path)`
-- `append_metrics(metrics: Mapping[str, object], outdir: Path, name: str = 'metrics.jsonl')`
-- `write_run_manifest(outdir: Path, info: Mapping[str, object])`
-
-### restart
-
-Read/write restart metadata for PADDLE dual-boost runs.
-
-Key functions/classes:
-- `class RestartRecord`
-- `class RestartFormatError`
-- `read_restart(path: str | Path, k0_bounds: Tuple[float, float] = DEFAULT_K0_BOUNDS)`
-- `write_restart(path: str | Path, rec: RestartRecord, k0_bounds: Tuple[float, float] =
-  DEFAULT_K0_BOUNDS)`
-- `backup(path: str | Path, backup_dir: str | Path)`
-- `record_to_boost_params(rec: RestartRecord)`
-- `validate_against_state(rec: RestartRecord, expected_steps: Optional[int] = None)`
-- `normalize_restart_record(rec: RestartRecord, k0_bounds: Tuple[float, float] =
-  DEFAULT_K0_BOUNDS)`
-
-## Closed-loop controller
-
-The controller implements a deterministic, rule-based policy that adapts GaMD bias
-parameters using monitored simulation metrics. It is designed to maintain Gaussianity of
-boosted potential energies while exploring conformational space responsibly.
-
-Observation signals:
-- Gaussianity metrics: skewness, excess kurtosis, and tail risk.
-- Exploration score when available in per-cycle metrics.
-- Latent diagnostics when a latent-space model is present.
-
-Decision policy:
-- Deterministic policy in `policy.py` that combines confidence, exploration, and uncertainty
-  signals.
-- Multi-objective alpha selection with optional change-point penalty.
-
-Actuation:
-- Updates to integrator parameters (k0D, k0P, refED/refEP bounds) per cycle.
-
-Safety controls:
-- Freeze criteria driven by Gaussianity and change-point detection.
-- Uncertainty-aware damping to reduce aggressive updates.
-- Hysteresis via confidence histories and damped update magnitudes.
-- Multi-objective alpha blending for stability and exploration balance.
-
-## ML model component
-
-The ML component trains an ensemble model to predict observables used by the controller. An
-ensemble refers to multiple models trained to quantify epistemic uncertainty, not multiple
-simulation replicas. Conformal uncertainty calibration, when present, is summarized in the
-model report output.
-
-Model outputs:
-- `model_summary.json` capturing ensemble statistics, uncertainty, and calibration data.
-
-## Reweighting diagnostics
-
-Reweighting diagnostics compute effective sample size (ESS), entropy-based measures, and
-related convergence indicators when boost potential samples are available. The diagnostics
-are integrated into per-cycle metrics and bias plans.
-
-## Outputs and artifacts
-
-- `bias_plan_cycle_*.json`: Per-cycle bias plan and controller state. Major keys include:
-  controller, cycle, metrics, params; params keys: VmaxD, VmaxP, VminD, VminP, k0D, k0P,
-  refED, refED_factor, refEP, refEP_factor; metrics keys: cycle_stats Detected in code scan.
-- `metrics.jsonl / metrics.json`: Cycle metrics logs aggregated over the run. Detected in
-  code scan.
-- `model_summary.json`: Model ensemble summary and uncertainty statistics. Detected in code
-  scan.
-- `latent_pca.json`: Latent diagnostics used for Gaussianity analysis. Detected in code
-  scan.
-- `gamd-restart.dat`: GaMD restart checkpoint for continuing simulations. Detected in code
-  scan.
-- `controller_diagnostics.svg`: Closed-loop control diagnostics plots. Detected in code
-  scan.
-- `reweighting_diagnostics.svg`: Reweighting diagnostics plots. Detected in code scan.
-- `ablation_comparison.svg`: Ablation comparison plot (only when running ablation scripts).
-  Detected in code scan.
-- `adaptive_stop.json`: Adaptive stopping decision record. Detected in code scan.
-
-## Configuration reference
-
-Configuration fields are parsed from `SimulationConfig`. Defaults and type annotations are
-listed where available.
-
-### system / I/O
-- `parmFile: str` = `'topology/protein_solvated.parm7'`
-- `crdFile: str` = `'topology/protein_solvated.rst7'`
-- `simType: str` = `'explicit'`
-- `safe_mode: bool` = `False`
-- `platform: str` = `'CUDA'`
-- `precision: str` = `'mixed'`
-- `require_gpu: bool` = `False`
-- `cuda_device_index: int` = `0`
-- `cuda_precision: str` = `'mixed'`
-- `deterministic_forces: bool` = `False`
-- `seed: int` = `2025`
-- `outdir: str` = `'out'`
-- `compress_logs: bool` = `True`
-- `notes: Optional[str]` = `None`
-
-### MD / integrator
-- `nbCutoff: float` = `10.0`
-- `temperature: float` = `300.0`
-- `dt: Optional[float]` = `None`
-- `ntcmd: int` = `10000000`
-- `cmdRestartFreq: int` = `100`
-- `ncycebprepstart: int` = `0`
-- `ncycebprepend: int` = `1`
-- `ntebpreppercyc: int` = `2500000`
-- `ebprepRestartFreq: int` = `100`
-- `ncycebstart: int` = `0`
-- `ncycebend: int` = `3`
-- `ntebpercyc: int` = `2500000`
-- `ebRestartFreq: int` = `100`
-- `ncycprodstart: int` = `0`
-- `ncycprodend: int` = `4`
-- `ntprodpercyc: int` = `250000000`
-- `prodRestartFreq: int` = `500`
-- `refEP_factor: float` = `0.05`
-- `refED_factor: float` = `0.05`
-- `k0_initial: float` = `0.5`
-- `k0_min: float` = `0.1`
-- `k0_max: float` = `0.9`
-
-### controller thresholds
-- `gaussian_skew_good: float` = `0.2`
-- `gaussian_excess_kurtosis_good: float` = `0.2`
-- `gaussian_excess_kurtosis_high: float` = `1.0`
-- `gaussian_tail_risk_good: float` = `0.01`
-- `gaussian_skew_freeze: float` = `0.6`
-- `gaussian_excess_kurtosis_freeze: float` = `2.0`
-- `gaussian_tail_risk_freeze: float` = `0.05`
-- `policy_damp_min: float` = `0.05`
-- `policy_damp_max: float` = `1.0`
-- `controller_enabled: bool` = `True`
-
-### uncertainty calibration
-- `uncertainty_ref: float` = `0.2`
-- `uncertainty_damp_power: float` = `1.0`
-
-### plotting
-- No fields detected.
-
-### stopping criteria
-- No fields detected.
-
-### other
-- No fields detected.
-
-## Enhancement features
-
-- adaptive stop: Detected in code scan.
-- auto plotting: Detected in code scan.
-- change-point detection: Detected in code scan.
-- closed-loop control: Detected in code scan.
-- conformal uncertainty: Detected in code scan.
-- freeze/damping: Detected in code scan.
-- hysteresis: Detected in code scan.
-- latent diagnostics: Detected in code scan.
-- multi-objective control: Detected in code scan.
-- reweighting diagnostics: Detected in code scan.
-
-## Reproducibility
-
-Runs are deterministic when seeds are fixed and deterministic force settings are enabled.
-Environment manifests and JSON logs capture configuration, metrics, and controller
-decisions, allowing reviewers to reproduce the pipeline and audit each control decision.
+- `docs/architecture.md`
+- `docs/gamd.md`
+- `docs/gnn.md`
+- `docs/config.md`
