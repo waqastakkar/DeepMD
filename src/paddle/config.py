@@ -202,6 +202,8 @@ class SimulationConfig:
     gaussian_skew_freeze: float = 0.6
     gaussian_excess_kurtosis_freeze: float = 2.0
     gaussian_tail_risk_freeze: float = 0.05
+    deltaV_std_max: Optional[float] = None
+    deltaV_damp_factor: float = 0.5
 
     policy_damp_min: float = 0.05
     policy_damp_max: float = 1.0
@@ -289,6 +291,9 @@ class SimulationConfig:
             10.0,
         )
         _assert_range("gaussian_tail_risk_freeze", self.gaussian_tail_risk_freeze, 0.0, 1.0)
+        if self.deltaV_std_max is not None:
+            _assert_range("deltaV_std_max", self.deltaV_std_max, 0.0)
+        _assert_range("deltaV_damp_factor", self.deltaV_damp_factor, 0.0, 1.0)
 
         _assert_range("policy_damp_min", self.policy_damp_min, 0.0, 1.0)
         _assert_range("policy_damp_max", self.policy_damp_max, 0.0, 1.0)

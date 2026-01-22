@@ -132,6 +132,18 @@ class RunningMoments:
             "tail_risk": self.tail_risk(),
         }
 
+def _compute_density_g_per_ml(sim, state, total_mass) -> Optional[float]:
+    try:
+        if not sim.system.usesPeriodicBoundaryConditions():
+            return None
+        volume = state.getPeriodicBoxVolume()
+        if volume is None:
+            return None
+        density = (total_mass / volume).value_in_unit(unit.gram / unit.milliliter)
+        return float(density)
+    except Exception:
+        return None
+
 def _compute_temperature_k(state, sim) -> Optional[float]:
     try:
         kinetic = state.getKineticEnergy()
@@ -191,17 +203,32 @@ def _make_reweight_sampler(sim, integ, deltaV_samples: list[float], temperature_
     return sample, state
 
 
-def _make_gamd_diagnostic_sampler(sim, integ, logger: CSVLogger):
+def _make_gamd_diagnostic_sampler(sim, integ, logger: CSVLogger, ml_logger: Optional[CSVLogger] = None):
     stats_d = RunningMoments()
     stats_p = RunningMoments()
+    stats_delta = RunningMoments()
+    total_mass = unit.Quantity(0.0, unit.dalton)
+    for idx in range(sim.system.getNumParticles()):
+        total_mass += sim.system.getParticleMass(idx)
+    zero_dihedral = {"count": 0, "warned": False}
 
     def sample() -> None:
-        state_total = sim.context.getState(getEnergy=True)
+        state_total = sim.context.getState(getEnergy=True, getVelocities=True, groups={1, 2, 3, 4})
         E_potential = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        temperature = _compute_temperature_k(state_total, sim)
+        density = _compute_density_g_per_ml(sim, state_total, total_mass)
         E_bond = sim.context.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         E_angle = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         E_dihedral = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         E_nonbonded = sim.context.getState(getEnergy=True, groups={4}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+
+        if abs(E_dihedral) <= 1e-6:
+            zero_dihedral["count"] += 1
+        else:
+            zero_dihedral["count"] = 0
+        if zero_dihedral["count"] > 10 and not zero_dihedral["warned"]:
+            print("WARNING: E_dihedral remains zero for >10 reports; check torsion forces / force groups.")
+            zero_dihedral["warned"] = True
 
         stats_d.update(float(E_dihedral))
         stats_p.update(float(E_potential))
@@ -212,6 +239,9 @@ def _make_gamd_diagnostic_sampler(sim, integ, logger: CSVLogger):
         Tref = float(integ.getGlobalVariableByName("TotalRefEnergy"))
         Dboost = float(integ.getGlobalVariableByName("DihedralBoostPotential"))
         Tboost = float(integ.getGlobalVariableByName("TotalBoostPotential"))
+        deltaV = Dboost + Tboost
+        stats_delta.update(float(deltaV))
+        stats_delta_snap = stats_delta.snapshot()
         VminD = float(integ.getGlobalVariableByName("VminD"))
         VmaxD = float(integ.getGlobalVariableByName("VmaxD"))
         VminP = float(integ.getGlobalVariableByName("VminP"))
@@ -228,12 +258,15 @@ def _make_gamd_diagnostic_sampler(sim, integ, logger: CSVLogger):
             "E_angle_kJ": float(E_angle),
             "E_dihedral_kJ": float(E_dihedral),
             "E_nonbonded_kJ": float(E_nonbonded),
+            "Temperature_K": temperature,
+            "Density_g_per_ml": density,
             "DihedralRef_kJ": Dref,
             "TotalRef_kJ": Tref,
             "Dihedral_k": kD,
             "Total_k": kP,
             "DihedralBoost_kJ": Dboost,
             "TotalBoost_kJ": Tboost,
+            "DeltaV_kJ": deltaV,
             "BoostedDihedral_kJ": float(E_dihedral) + Dboost,
             "BoostedTotal_kJ": float(E_potential) + Tboost,
             "VminD_kJ": VminD,
@@ -254,7 +287,35 @@ def _make_gamd_diagnostic_sampler(sim, integ, logger: CSVLogger):
             "Total_skewness": stats_p_snap["skewness"],
             "Total_excess_kurtosis": stats_p_snap["excess_kurtosis"],
             "Total_tail_risk": stats_p_snap["tail_risk"],
+            "DeltaV_mean_kJ": stats_delta_snap["mean"],
+            "DeltaV_std_kJ": stats_delta_snap["std"],
+            "DeltaV_min_kJ": stats_delta_snap["min"],
+            "DeltaV_max_kJ": stats_delta_snap["max"],
+            "DeltaV_skewness": stats_delta_snap["skewness"],
+            "DeltaV_excess_kurtosis": stats_delta_snap["excess_kurtosis"],
+            "DeltaV_tail_risk": stats_delta_snap["tail_risk"],
         })
+
+        if ml_logger is not None:
+            ml_logger.writerow({
+                "step": int(getattr(sim, "currentStep", 0)),
+                "E_potential": float(E_potential),
+                "E_bond": float(E_bond),
+                "E_angle": float(E_angle),
+                "E_dihedral": float(E_dihedral),
+                "E_nonbonded": float(E_nonbonded),
+                "Temperature": temperature,
+                "Density": density,
+                "GaMD_E_threshold": Tref,
+                "GaMD_k": kP,
+                "GaMD_dV": float(deltaV),
+                "GaMD_V_star": float(E_potential) + float(deltaV),
+                "GaMD_V_avg": stats_p_snap["mean"],
+                "GaMD_V_std": stats_p_snap["std"],
+                "GaMD_skew": stats_delta_snap["skewness"],
+                "GaMD_kurtosis": stats_delta_snap["excess_kurtosis"],
+                "GaMD_tail_risk": stats_delta_snap["tail_risk"],
+            })
 
     return sample
 
@@ -420,7 +481,7 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
     for _ in range(n):
         sim.step(interval)
         Ed = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-        state_total = sim.context.getState(getEnergy=True, getVelocities=True)
+        state_total = sim.context.getState(getEnergy=True, getVelocities=True, groups={1, 2, 3, 4})
         Ep = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         dihedral_samples.append(Ed)
         total_samples.append(Ep)
@@ -763,12 +824,15 @@ def _run_equil_cycle(
             "E_angle_kJ",
             "E_dihedral_kJ",
             "E_nonbonded_kJ",
+            "Temperature_K",
+            "Density_g_per_ml",
             "DihedralRef_kJ",
             "TotalRef_kJ",
             "Dihedral_k",
             "Total_k",
             "DihedralBoost_kJ",
             "TotalBoost_kJ",
+            "DeltaV_kJ",
             "BoostedDihedral_kJ",
             "BoostedTotal_kJ",
             "VminD_kJ",
@@ -789,8 +853,35 @@ def _run_equil_cycle(
             "Total_skewness",
             "Total_excess_kurtosis",
             "Total_tail_risk",
+            "DeltaV_mean_kJ",
+            "DeltaV_std_kJ",
+            "DeltaV_min_kJ",
+            "DeltaV_max_kJ",
+            "DeltaV_skewness",
+            "DeltaV_excess_kurtosis",
+            "DeltaV_tail_risk",
         ], compress=cfg.compress_logs)
-        diag_sample_fn = _make_gamd_diagnostic_sampler(sim, integ, diag_logger)
+        ml_path = equil_dir / f"gamd-ml-cycle{cyc:02d}.csv"
+        ml_logger = CSVLogger(ml_path, [
+            "step",
+            "E_potential",
+            "E_bond",
+            "E_angle",
+            "E_dihedral",
+            "E_nonbonded",
+            "Temperature",
+            "Density",
+            "GaMD_E_threshold",
+            "GaMD_k",
+            "GaMD_dV",
+            "GaMD_V_star",
+            "GaMD_V_avg",
+            "GaMD_V_std",
+            "GaMD_skew",
+            "GaMD_kurtosis",
+            "GaMD_tail_risk",
+        ], compress=cfg.compress_logs)
+        diag_sample_fn = _make_gamd_diagnostic_sampler(sim, integ, diag_logger, ml_logger=ml_logger)
         sample_fn = _combine_samplers(sample_fn, diag_sample_fn)
 
     _step_with_checks(
@@ -801,6 +892,17 @@ def _run_equil_cycle(
         outdir,
         sample_fn=sample_fn,
     )
+
+    if deltaV_samples:
+        deltaV_report = gaussianity_report(np.asarray(deltaV_samples, dtype=float))
+        metrics.update({
+            "deltaV_mean": float(np.mean(deltaV_samples)),
+            "deltaV_std": float(np.std(deltaV_samples)),
+            "deltaV_skewness": float(deltaV_report["skewness"]),
+            "deltaV_excess_kurtosis": float(deltaV_report["excess_kurtosis"]),
+            "deltaV_tail_risk": float(deltaV_report["tail_risk"]),
+        })
+        bias_plan.setdefault("metrics", {})["deltaV"] = deltaV_report
 
     VminD_f = float(integ.getGlobalVariableByName("VminD"))
     VmaxD_f = float(integ.getGlobalVariableByName("VmaxD"))
@@ -889,12 +991,15 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
             "E_angle_kJ",
             "E_dihedral_kJ",
             "E_nonbonded_kJ",
+            "Temperature_K",
+            "Density_g_per_ml",
             "DihedralRef_kJ",
             "TotalRef_kJ",
             "Dihedral_k",
             "Total_k",
             "DihedralBoost_kJ",
             "TotalBoost_kJ",
+            "DeltaV_kJ",
             "BoostedDihedral_kJ",
             "BoostedTotal_kJ",
             "VminD_kJ",
@@ -915,8 +1020,35 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
             "Total_skewness",
             "Total_excess_kurtosis",
             "Total_tail_risk",
+            "DeltaV_mean_kJ",
+            "DeltaV_std_kJ",
+            "DeltaV_min_kJ",
+            "DeltaV_max_kJ",
+            "DeltaV_skewness",
+            "DeltaV_excess_kurtosis",
+            "DeltaV_tail_risk",
         ], compress=cfg.compress_logs)
-        diag_sample_fn = _make_gamd_diagnostic_sampler(sim, integ, diag_logger)
+        ml_path = prod_dir / f"gamd-ml-cycle{cyc:02d}.csv"
+        ml_logger = CSVLogger(ml_path, [
+            "step",
+            "E_potential",
+            "E_bond",
+            "E_angle",
+            "E_dihedral",
+            "E_nonbonded",
+            "Temperature",
+            "Density",
+            "GaMD_E_threshold",
+            "GaMD_k",
+            "GaMD_dV",
+            "GaMD_V_star",
+            "GaMD_V_avg",
+            "GaMD_V_std",
+            "GaMD_skew",
+            "GaMD_kurtosis",
+            "GaMD_tail_risk",
+        ], compress=cfg.compress_logs)
+        diag_sample_fn = _make_gamd_diagnostic_sampler(sim, integ, diag_logger, ml_logger=ml_logger)
         sample_fn = _combine_samplers(sample_fn, diag_sample_fn)
 
     _step_with_checks(
