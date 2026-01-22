@@ -16,6 +16,7 @@ def test_simulation_config_determinism_and_precision():
         {
             "precision": "double",
             "deterministic_forces": True,
+            "controller_enabled": False,
             "parmFile": config_path,
             "crdFile": config_path,
         }

@@ -11,6 +11,7 @@ import platform
 import random
 import sys
 import warnings
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -96,6 +97,15 @@ def _assert_range(name: str, val: float, lo: float | None = None, hi: float | No
         raise ValueError(f"{name} must be <= {hi}, got {val}")
 
 
+def _is_finite_number(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def _exists_if_set(path: Path, name: str) -> None:
     if path and not path.exists():
         raise FileNotFoundError(f"{name} not found: {path}")
@@ -141,6 +151,7 @@ class SimulationConfig:
 
     temperature: float = 300.0
     dt: Optional[float] = 0.002
+    dt_user_provided: bool = False
     safe_mode: bool = False
     debug_safe_dt_fs: float = 1.0
     debug_disable_gamd: bool = False
@@ -203,6 +214,8 @@ class SimulationConfig:
     k_max: Optional[float] = None
     sigma0D: Optional[float] = None
     sigma0P: Optional[float] = None
+    gamd_boost_mode: Optional[str] = None
+    dihedral_only: bool = False
     gamd_ramp_ns: float = 0.5
     deltaV_abs_max: float = 2000.0
     gamd_stable_conf_min: float = 0.6
@@ -237,6 +250,8 @@ class SimulationConfig:
     useDispersionCorrection: bool = True
     rigidWater: bool = True
     gamd_diag_enabled: bool = True
+    nan_check_interval: int = 1000
+    safe_mode_io_scale: int = 2
 
     seed: int = 2025
     outdir: str = "out"
@@ -257,6 +272,8 @@ class SimulationConfig:
         if self.dt is None:
             self.dt = 0.002
         _assert_range("dt", self.dt, 1e-9)
+        if not isinstance(self.dt_user_provided, bool):
+            raise ValueError("dt_user_provided must be a bool")
         _assert_range("debug_safe_dt_fs", self.debug_safe_dt_fs, 1e-6)
         _assert_range("cmd_ns", self.cmd_ns, 1e-12)
         _assert_range("equil_ns_per_cycle", self.equil_ns_per_cycle, 1e-12)
@@ -268,6 +285,8 @@ class SimulationConfig:
             _assert_range("sigma0D", self.sigma0D, 0.0)
         if self.sigma0P is not None:
             _assert_range("sigma0P", self.sigma0P, 0.0)
+        if not isinstance(self.dihedral_only, bool):
+            raise ValueError("dihedral_only must be a bool")
         _assert_range("minimize_tolerance_kj_per_mol", self.minimize_tolerance_kj_per_mol, 0.0)
         _assert_range("heat_ns", self.heat_ns, 0.0)
         _assert_range("heat_t_start", self.heat_t_start, 0.0, 5000.0)
@@ -281,6 +300,8 @@ class SimulationConfig:
             "ncycebprepend", "ncycebend", "ncycprodend",
             "minimize_max_iter", "ntheat", "heat_report_freq",
             "ntdensity", "barostat_interval", "density_report_freq",
+            "nan_check_interval",
+            "safe_mode_io_scale",
         ]:
             val = getattr(self, name)
             if not isinstance(val, int) or val <= 0:
@@ -315,6 +336,30 @@ class SimulationConfig:
         if self.deltaV_std_max is not None:
             _assert_range("deltaV_std_max", self.deltaV_std_max, 0.0)
         _assert_range("deltaV_damp_factor", self.deltaV_damp_factor, 0.0, 1.0)
+
+        if self.controller_enabled and not self.debug_disable_gamd:
+            required_keys = ["deltaV_std_max", "k_min", "k_max", "sigma0D", "sigma0P"]
+            invalid = [key for key in required_keys if not _is_finite_number(getattr(self, key, None))]
+            if invalid:
+                example = (
+                    "controller_enabled: true\n"
+                    "debug_disable_gamd: false\n"
+                    "deltaV_std_max: 10.0\n"
+                    "k_min: 0.05\n"
+                    "k_max: 0.9\n"
+                    "sigma0D: 6.0\n"
+                    "sigma0P: 10.0\n"
+                )
+                invalid_list = ", ".join(invalid)
+                raise ValueError(
+                    "Missing or invalid GaMD config keys: "
+                    f"{invalid_list}. Provide finite floats for all required keys. Example YAML:\n{example}"
+                )
+            if not (0.0 < float(self.k_min) <= float(self.k_max) <= 1.0):
+                raise ValueError("k_min/k_max must satisfy 0 < k_min <= k_max <= 1")
+            _assert_range("deltaV_std_max", float(self.deltaV_std_max), 1e-12)
+            _assert_range("sigma0D", float(self.sigma0D), 1e-12)
+            _assert_range("sigma0P", float(self.sigma0P), 1e-12)
 
         _assert_range("policy_damp_min", self.policy_damp_min, 0.0, 1.0)
         _assert_range("policy_damp_max", self.policy_damp_max, 0.0, 1.0)
@@ -472,6 +517,7 @@ class SimulationConfig:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "SimulationConfig":
         cfg = SimulationConfig(**d)
+        cfg.dt_user_provided = "dt" in d
         cfg.reconcile_time_settings(input_keys=set(d.keys()))
         cfg.validate()
         return cfg
@@ -581,6 +627,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--deltaV_abs_max", type=float, default=None)
     ap.add_argument("--gamd_stable_conf_min", type=float, default=None)
     ap.add_argument("--gamd_stable_min_cycles", type=int, default=None)
+    ap.add_argument("--gamd_boost_mode", type=str, default=None)
+    ap.add_argument("--dihedral_only", action="store_true", default=None)
     ap.add_argument("--platform", type=str, default=None)
     ap.add_argument("--precision", type=str, default=None)
     ap.add_argument("--require_gpu", action="store_true", default=None)
@@ -590,6 +638,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--outdir", type=str, default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--notes", type=str, default=None)
+    ap.add_argument("--nan_check_interval", type=int, default=None)
+    ap.add_argument("--safe_mode_io_scale", type=int, default=None)
     ap.add_argument("--echo", action="store_true", help="Print validated config and exit")
     ap.add_argument("--write-template", type=str, default=None, help="Write a template YAML/JSON/TOML file and exit")
     ap.add_argument("--write-json", type=str, default=None, help="Write current config to JSON and exit")

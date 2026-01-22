@@ -348,6 +348,19 @@ def _velocities_finite(velocities) -> bool:
     return bool(np.isfinite(velocities_nm_ps).all())
 
 
+def _energies_finite(state) -> bool:
+    try:
+        potential = state.getPotentialEnergy()
+        kinetic = state.getKineticEnergy()
+        if potential is None or kinetic is None:
+            return False
+        potential_val = float(potential.value_in_unit(unit.kilojoule_per_mole))
+        kinetic_val = float(kinetic.value_in_unit(unit.kilojoule_per_mole))
+        return bool(np.isfinite(potential_val) and np.isfinite(kinetic_val))
+    except Exception:
+        return False
+
+
 def _record_last_valid_state(sim, state) -> None:
     sim._last_valid_positions = state.getPositions()
     try:
@@ -381,6 +394,8 @@ def _dump_instability(
     outdir: Path,
     label: str,
     state,
+    *,
+    error_message: Optional[str] = None,
 ) -> None:
     ensure_dir(outdir)
     step = int(getattr(sim, "currentStep", 0))
@@ -418,30 +433,50 @@ def _dump_instability(
         )
     diag_path = outdir / f"crash_diagnostics_{label}.json"
     write_json(diagnostics, diag_path)
-    raise RuntimeError(
-        "Non-finite positions/velocities detected. "
-        f"Wrote {crash_pdb}, {diag_path}, and {crash_cfg}."
-    )
+    if error_message is None:
+        error_message = (
+            "Non-finite positions/velocities detected. "
+            f"Wrote {crash_pdb}, {diag_path}, and {crash_cfg}."
+        )
+    raise RuntimeError(error_message)
 
 
 def _check_state_finite(sim, cfg: SimulationConfig, label: str, outdir: Path) -> None:
     state = sim.context.getState(getEnergy=True, getPositions=True, getVelocities=True)
     positions = state.getPositions(asNumpy=True)
     velocities = state.getVelocities(asNumpy=True)
-    if _positions_finite(positions) and _velocities_finite(velocities):
+    if _positions_finite(positions) and _velocities_finite(velocities) and _energies_finite(state):
         _record_last_valid_state(sim, state)
         return
-    _dump_instability(sim, cfg, outdir, label, state)
+    message = None
+    if label == "init":
+        message = "Non-finite state immediately after initialization; check structure/overlaps or GaMD parameters."
+    _dump_instability(sim, cfg, outdir, label, state, error_message=message)
 
 
 def _resolve_dt_ps(cfg: SimulationConfig, default: float = 0.002) -> float:
     dt = getattr(cfg, "dt", None)
     if dt is None:
         dt = default
-    if getattr(cfg, "safe_mode", False):
+    if getattr(cfg, "safe_mode", False) and not bool(getattr(cfg, "dt_user_provided", False)):
         dt_fs = float(getattr(cfg, "debug_safe_dt_fs", 1.0))
         dt = dt_fs / 1000.0
     return float(dt)
+
+
+def _apply_safe_mode_overrides(cfg: SimulationConfig) -> None:
+    if not getattr(cfg, "safe_mode", False):
+        return
+    if not bool(getattr(cfg, "dt_user_provided", False)):
+        if cfg.dt is None or abs(float(cfg.dt) - 0.001) > 1e-9:
+            cfg.dt = 0.001
+            print("dt_ps=0.001 (safe_mode override)")
+    io_scale = int(getattr(cfg, "safe_mode_io_scale", 2))
+    if io_scale < 1:
+        io_scale = 1
+    for name in ("heat_report_freq", "density_report_freq", "ebRestartFreq", "prodRestartFreq", "cmdRestartFreq"):
+        current = int(getattr(cfg, name))
+        setattr(cfg, name, max(1, current * io_scale))
 
 def _adaptive_stop_status(
     cfg: SimulationConfig,
@@ -565,25 +600,30 @@ def _step_with_checks(
 ) -> None:
     remaining = int(total_steps)
     block = max(1, int(block_size))
+    check_interval = max(1, int(getattr(cfg, "nan_check_interval", block)))
     if getattr(cfg, "safe_mode", False):
         block = min(block, 200)
     block_index = 0
     init_state = sim.context.getState(getEnergy=True, getPositions=True, getVelocities=True)
-    if _positions_finite(init_state.getPositions(asNumpy=True)) and _velocities_finite(init_state.getVelocities(asNumpy=True)):
+    if (
+        _positions_finite(init_state.getPositions(asNumpy=True))
+        and _velocities_finite(init_state.getVelocities(asNumpy=True))
+        and _energies_finite(init_state)
+    ):
         _record_last_valid_state(sim, init_state)
     else:
         _dump_instability(sim, cfg, outdir, f"{label_prefix}_initial", init_state)
     while remaining > 0:
         if integ is not None:
             _update_gamd_boost_scale(sim, integ, cfg, gamd_ready)
-        step_now = min(block, remaining)
+        step_now = min(block, remaining, check_interval)
         sim.step(step_now)
         if sample_fn is not None:
             sample_fn()
         state = sim.context.getState(getEnergy=True, getPositions=True, getVelocities=True)
         positions = state.getPositions(asNumpy=True)
         velocities = state.getVelocities(asNumpy=True)
-        if _positions_finite(positions) and _velocities_finite(velocities):
+        if _positions_finite(positions) and _velocities_finite(velocities) and _energies_finite(state):
             _record_last_valid_state(sim, state)
         else:
             _dump_instability(sim, cfg, outdir, f"{label_prefix}_block{block_index:04d}", state)
@@ -624,6 +664,16 @@ def _load_cmd_checkpoint_if_any(sim, outdir: Path) -> bool:
     except Exception:
         pass
     return True
+
+
+def _ensure_initial_velocities(sim, temperature_k: float) -> None:
+    try:
+        state = sim.context.getState(getVelocities=True)
+        velocities = state.getVelocities()
+    except Exception:
+        velocities = None
+    if velocities is None:
+        sim.context.setVelocitiesToTemperature(temperature_k * unit.kelvin)
 
 def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
     assert steps >= interval >= 1
@@ -1322,6 +1372,7 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     ensure_dir(outdir)
     set_global_seed(cfg.seed)
 
+    _apply_safe_mode_overrides(cfg)
     dt_ps = _resolve_dt_ps(cfg)
     if getattr(cfg, "safe_mode", False):
         if cfg.dt != dt_ps:
@@ -1351,6 +1402,8 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
             )
             logged = True
         loaded = _load_cmd_checkpoint_if_any(sim, outdir)
+        _ensure_initial_velocities(sim, cfg.temperature)
+        _check_state_finite(sim, cfg, "init", outdir)
     if not loaded:
         opts_nvt = _options_from_cfg(cfg, add_barostat=False)
         integ_nvt = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
@@ -1369,6 +1422,8 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
                 ewald_error_tolerance=opts_nvt.ewald_error_tolerance,
             )
             logged = True
+        _ensure_initial_velocities(sim_nvt, cfg.temperature)
+        _check_state_finite(sim_nvt, cfg, "init", outdir)
         run_minimization(cfg, sim_nvt, outdir)
         run_heating(cfg, sim_nvt, outdir)
         if not cfg.do_heating:
