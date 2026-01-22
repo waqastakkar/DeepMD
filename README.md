@@ -173,6 +173,45 @@ Key YAML sections include:
 - **GPU options:** `platform`, `precision`, `cuda_device_index`, `cuda_precision`, `require_gpu`
 - **Control + diagnostics:** Gaussianity thresholds, reweighting diagnostics, closed-loop controller toggles
 
+Example explicit ff19SB + OPC GaMD configs (dual boost and dihedral-only):
+
+```yaml
+# Dual-boost GaMD (explicit ff19SB + OPC)
+parmFile: topology/complex_ff19sb_opc.parm7
+crdFile: topology/complex_ff19sb_opc.rst7
+simType: protein.explicit
+temperature: 300
+dt: 0.002
+controller_enabled: true
+debug_disable_gamd: false
+deltaV_std_max: 10.0
+k_min: 0.05
+k_max: 0.9
+sigma0D: 6.0
+sigma0P: 10.0
+gamd_ramp_ns: 0.5
+deltaV_abs_max: 2000.0
+safe_mode: false  # if true and dt is omitted, dt is overridden to 0.001 ps
+```
+
+```yaml
+# Dihedral-only GaMD (explicit ff19SB + OPC)
+parmFile: topology/complex_ff19sb_opc.parm7
+crdFile: topology/complex_ff19sb_opc.rst7
+simType: protein.explicit
+temperature: 300
+dihedral_only: true
+controller_enabled: true
+debug_disable_gamd: false
+deltaV_std_max: 6.0
+k_min: 0.05
+k_max: 0.9
+sigma0D: 6.0
+sigma0P: 10.0
+gamd_ramp_ns: 0.5
+deltaV_abs_max: 2000.0
+```
+
 # GaMD Theory (Concise but correct)
 
 GaMD adds a harmonic boost potential to smooth the energy landscape when the system’s potential energy falls below a threshold energy **E**. The boost is:
