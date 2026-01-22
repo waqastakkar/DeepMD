@@ -170,7 +170,7 @@ class SimulationConfig:
     ])
 
     ntcmd: int = 2_500_000
-    cmdRestartFreq: int = 100
+    cmdRestartFreq: int = 25000
 
     do_minimize: bool = True
     minimize_max_iter: int = 20000
@@ -181,45 +181,48 @@ class SimulationConfig:
     heat_t_end: float = 300.0
     heat_ns: float = 0.2
     ntheat: int = 100_000
-    heat_report_freq: int = 1000
+    heat_report_freq: int = 25000
 
     do_density_equil: bool = True
     density_ns: float = 0.5
     ntdensity: int = 250_000
     pressure_atm: float = 1.0
     barostat_interval: int = 25
-    density_report_freq: int = 1000
+    density_report_freq: int = 25000
 
     ncycebprepstart: int = 0
     ncycebprepend: int = 1
     ntebpreppercyc: int = 2_500_000
-    ebprepRestartFreq: int = 100
+    ebprepRestartFreq: int = 50000
 
     ncycebstart: int = 0
     ncycebend: int = 3
     ntebpercyc: int = 2_500_000
-    ebRestartFreq: int = 100
+    ebRestartFreq: int = 50000
 
     ncycprodstart: int = 0
     ncycprodend: int = 4
     ntprodpercyc: int = 2_500_000
-    prodRestartFreq: int = 500
+    prodRestartFreq: int = 100000
 
     refEP_factor: float = 0.05
     refED_factor: float = 0.05
     k0_initial: float = 0.5
     k0_min: float = 0.1
     k0_max: float = 0.9
-    k_min: Optional[float] = None
-    k_max: Optional[float] = None
-    sigma0D: Optional[float] = None
-    sigma0P: Optional[float] = None
-    gamd_boost_mode: Optional[str] = None
+    k_min: Optional[float] = 0.10
+    k_max: Optional[float] = 0.90
+    sigma0D: Optional[float] = 6.0
+    sigma0P: Optional[float] = 10.0
+    gamd_boost_mode: Optional[str] = "dual"
     dihedral_only: bool = False
     gamd_ramp_ns: float = 0.5
     deltaV_abs_max: float = 2000.0
     gamd_stable_conf_min: float = 0.6
     gamd_stable_min_cycles: int = 1
+    gamd_start_stage: str = "after_density"
+    allow_dual_fallback: bool = True
+    fallback_boost_mode: str = "dihedral"
 
     gaussian_skew_good: float = 0.2
     gaussian_excess_kurtosis_good: float = 0.2
@@ -230,7 +233,7 @@ class SimulationConfig:
     gaussian_skew_freeze: float = 0.6
     gaussian_excess_kurtosis_freeze: float = 2.0
     gaussian_tail_risk_freeze: float = 0.05
-    deltaV_std_max: Optional[float] = None
+    deltaV_std_max: Optional[float] = 10.0
     deltaV_damp_factor: float = 0.5
 
     policy_damp_min: float = 0.05
@@ -287,6 +290,30 @@ class SimulationConfig:
             _assert_range("sigma0P", self.sigma0P, 0.0)
         if not isinstance(self.dihedral_only, bool):
             raise ValueError("dihedral_only must be a bool")
+        if self.gamd_boost_mode is not None:
+            mode = str(self.gamd_boost_mode).lower()
+            if "dihedral" in mode and "dual" not in mode and "total" not in mode:
+                self.gamd_boost_mode = "dihedral"
+            elif "dual" in mode or "total" in mode:
+                self.gamd_boost_mode = "dual"
+            else:
+                raise ValueError("gamd_boost_mode must be 'dual' or 'dihedral'")
+        if not isinstance(self.allow_dual_fallback, bool):
+            raise ValueError("allow_dual_fallback must be a bool")
+        if self.fallback_boost_mode is not None:
+            fallback = str(self.fallback_boost_mode).lower()
+            if "dihedral" in fallback and "dual" not in fallback and "total" not in fallback:
+                self.fallback_boost_mode = "dihedral"
+            elif "dual" in fallback or "total" in fallback:
+                self.fallback_boost_mode = "dual"
+            else:
+                raise ValueError("fallback_boost_mode must be 'dual' or 'dihedral'")
+        if self.gamd_start_stage is not None:
+            stage = str(self.gamd_start_stage).lower()
+            allowed = {"after_density", "immediate"}
+            if stage not in allowed:
+                raise ValueError(f"gamd_start_stage must be one of {sorted(allowed)}, got {self.gamd_start_stage}")
+            self.gamd_start_stage = stage
         _assert_range("minimize_tolerance_kj_per_mol", self.minimize_tolerance_kj_per_mol, 0.0)
         _assert_range("heat_ns", self.heat_ns, 0.0)
         _assert_range("heat_t_start", self.heat_t_start, 0.0, 5000.0)
@@ -502,7 +529,9 @@ class SimulationConfig:
             )
 
     def as_dict(self) -> Dict[str, Any]:
-        return dc.asdict(self)
+        data = dc.asdict(self)
+        data.pop("dt_user_provided", None)
+        return data
 
     def to_yaml(self) -> str:
         if yaml is None:
@@ -581,6 +610,7 @@ def write_env_manifest(outdir: str) -> Path:
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="DBMDX configuration utility")
     ap.add_argument("--config", type=str, help="Path to YAML/JSON/TOML config", default=None)
+    ap.add_argument("--dt", type=float, default=None)
     ap.add_argument("--parmFile", type=str, default=None)
     ap.add_argument("--crdFile", type=str, default=None)
     ap.add_argument("--simType", type=str, default=None)
@@ -656,6 +686,8 @@ def _apply_overrides(cfg: SimulationConfig, ns: argparse.Namespace) -> Simulatio
             if val is not None:
                 setattr(cfg, key, val)
                 overridden.add(key)
+    if "dt" in overridden:
+        cfg.dt_user_provided = True
     if getattr(ns, "deterministic_forces", False):
         cfg.deterministic_forces = True
         overridden.add("deterministic_forces")

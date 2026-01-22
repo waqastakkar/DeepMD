@@ -28,6 +28,11 @@ def test_missing_gamd_keys_raise_value_error(tmp_path):
     cfg_data.update({
         "controller_enabled": True,
         "debug_disable_gamd": False,
+        "deltaV_std_max": None,
+        "k_min": None,
+        "k_max": None,
+        "sigma0D": None,
+        "sigma0P": None,
     })
     with pytest.raises(ValueError) as excinfo:
         SimulationConfig.from_dict(cfg_data)

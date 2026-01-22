@@ -42,7 +42,7 @@ class DualDeepLearningGaMDEquilibration(CustomIntegrator):
         self.addPerDofVariable("oldx", 0.0)
         self.addUpdateContextState()
         for name in ["DihedralEnergy","BoostedDihedralEnergy","DihedralBoostPotential","DihedralRefEnergy","DihedralForceScalingFactor",
-                     "TotalEnergy","BoostedTotalEnergy","TotalBoostPotential","TotalRefEnergy","TotalForceScalingFactor"]:
+                     "TotalEnergy","BoostedTotalEnergy","TotalBoostPotential","TotalRefEnergy"]:
             self.addGlobalVariable(name, 0.0)
         for name in ["RawDihedralBoostPotential", "RawTotalBoostPotential", "RawDihedralForceScalingFactor", "RawTotalForceScalingFactor"]:
             self.addGlobalVariable(name, 0.0)
@@ -131,6 +131,85 @@ class DualDeepLearningGaMDEquilibration(CustomIntegrator):
         self.addConstrainPositions()
         self.addComputePerDof("v", "(x - oldx)/dt")
 
+class DihedralDeepLearningGaMDEquilibration(CustomIntegrator):
+    def __init__(self, dt_ps: float = 0.002, temperature_K: float = 300.0, params: BoostParams | None = None):
+        super().__init__(dt_ps * unit.picoseconds)
+        if params is None:
+            params = BoostParams(0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        params.clamp()
+        self.addGlobalVariable("collision_rate", 1.0 / unit.picosecond)
+        self.addGlobalVariable("thermal_energy", (unit.BOLTZMANN_CONSTANT_kB * unit.AVOGADRO_CONSTANT_NA * temperature_K * unit.kelvin))
+        self.addGlobalVariable("vscale", 0.0)
+        self.addGlobalVariable("fscale", 0.0)
+        self.addGlobalVariable("noisescale", 0.0)
+        self.addPerDofVariable("oldx", 0.0)
+        self.addUpdateContextState()
+        for name in ["DihedralEnergy","BoostedDihedralEnergy","DihedralBoostPotential","DihedralRefEnergy","DihedralForceScalingFactor",
+                     "TotalEnergy","BoostedTotalEnergy","TotalBoostPotential","TotalRefEnergy"]:
+            self.addGlobalVariable(name, 0.0)
+        for name in ["RawDihedralBoostPotential", "RawTotalBoostPotential", "RawDihedralForceScalingFactor", "RawTotalForceScalingFactor"]:
+            self.addGlobalVariable(name, 0.0)
+        self.addGlobalVariable("boost_scale", 1.0)
+        self.addGlobalVariable("deltaV_abs_max", 0.0)
+        self.addGlobalVariable("RawDeltaV", 0.0)
+        self.addGlobalVariable("DeltaV", 0.0)
+        self.addGlobalVariable("ClampScale", 1.0)
+        self.addGlobalVariable("EffectiveScale", 1.0)
+        self.addGlobalVariable("VminD", float(params.VminD))
+        self.addGlobalVariable("VmaxD", float(params.VmaxD))
+        self.addGlobalVariable("Dihedralk0", params.k0D)
+        self.addGlobalVariable("VminP", float(params.VminP))
+        self.addGlobalVariable("VmaxP", float(params.VmaxP))
+        self.addGlobalVariable("Totalk0", 0.0)
+        self.addGlobalVariable("refED_factor", params.refED_factor)
+        self.addGlobalVariable("refEP_factor", params.refEP_factor)
+        self.addGlobalVariable("TotalForceScalingFactor", 1.0)
+
+        self.addComputeGlobal("DihedralEnergy", "energy3")
+        self.addComputeGlobal("DihedralRefEnergy", "VminD + (VmaxD - VminD)/max(Dihedralk0, %g)" % _EPS)
+        self.beginIfBlock("DihedralRefEnergy > VmaxD + refED_factor*abs(VmaxD)")
+        self.addComputeGlobal("DihedralRefEnergy", "VmaxD")
+        self.endBlock()
+        self.beginIfBlock("DihedralEnergy < DihedralRefEnergy")
+        self.addComputeGlobal("RawDihedralBoostPotential", "0.5*Dihedralk0*(DihedralRefEnergy-DihedralEnergy)^2/max(VmaxD-VminD, %g)" % _EPS)
+        self.addComputeGlobal("RawDihedralForceScalingFactor", "1 - Dihedralk0*(DihedralRefEnergy-DihedralEnergy)/max(VmaxD-VminD, %g)" % _EPS)
+        self.endBlock()
+        self.beginIfBlock("DihedralEnergy >= DihedralRefEnergy")
+        self.addComputeGlobal("RawDihedralBoostPotential", "0.0")
+        self.addComputeGlobal("RawDihedralForceScalingFactor", "1.0")
+        self.endBlock()
+        self.addComputeGlobal("RawDeltaV", "boost_scale*RawDihedralBoostPotential")
+        self.addComputeGlobal("ClampScale", "1.0")
+        self.beginIfBlock("deltaV_abs_max > 0")
+        self.beginIfBlock("abs(RawDeltaV) > deltaV_abs_max")
+        self.addComputeGlobal("ClampScale", "deltaV_abs_max/abs(RawDeltaV)")
+        self.endBlock()
+        self.endBlock()
+        self.addComputeGlobal("EffectiveScale", "boost_scale*ClampScale")
+        self.addComputeGlobal("DihedralBoostPotential", "EffectiveScale*RawDihedralBoostPotential")
+        self.addComputeGlobal(
+            "DihedralForceScalingFactor",
+            "1 - EffectiveScale*(1 - RawDihedralForceScalingFactor)",
+        )
+        self.addComputeGlobal("BoostedDihedralEnergy", "DihedralEnergy + DihedralBoostPotential")
+        self.addComputeGlobal("DeltaV", "DihedralBoostPotential")
+        self.addComputeGlobal("VminD", "min(DihedralEnergy, VminD)")
+        self.addComputeGlobal("VmaxD", "max(DihedralEnergy, VmaxD)")
+
+        self.addComputeGlobal("vscale", "exp(-dt*collision_rate)")
+        self.addComputeGlobal("fscale", "(1 - vscale)/collision_rate")
+        self.addComputeGlobal("noisescale", "sqrt(thermal_energy*(1 - vscale*vscale))")
+        self.addComputePerDof("oldx", "x")
+        self.addComputePerDof("v", "vscale*v + noisescale*gaussian/sqrt(m)")
+        self.addComputePerDof("v", "v + f0*fscale/m")
+        self.addComputePerDof("v", "v + f1*TotalForceScalingFactor*fscale/m")
+        self.addComputePerDof("v", "v + f2*TotalForceScalingFactor*fscale/m")
+        self.addComputePerDof("v", "v + f4*TotalForceScalingFactor*fscale/m")
+        self.addComputePerDof("v", "v + f3*TotalForceScalingFactor*DihedralForceScalingFactor*fscale/m")
+        self.addComputePerDof("x", "x + dt*v")
+        self.addConstrainPositions()
+        self.addComputePerDof("v", "(x - oldx)/dt")
+
 class DualDeepLearningGaMDProduction(CustomIntegrator):
     def __init__(self, dt_ps: float = 0.002, temperature_K: float = 300.0, params: BoostParams | None = None):
         super().__init__(dt_ps * unit.picoseconds)
@@ -145,7 +224,7 @@ class DualDeepLearningGaMDProduction(CustomIntegrator):
         self.addPerDofVariable("oldx", 0.0)
         self.addUpdateContextState()
         for name in ["DihedralEnergy","BoostedDihedralEnergy","DihedralBoostPotential","DihedralRefEnergy","DihedralForceScalingFactor",
-                     "TotalEnergy","BoostedTotalEnergy","TotalBoostPotential","TotalRefEnergy","TotalForceScalingFactor"]:
+                     "TotalEnergy","BoostedTotalEnergy","TotalBoostPotential","TotalRefEnergy"]:
             self.addGlobalVariable(name, 0.0)
         for name in ["RawDihedralBoostPotential", "RawTotalBoostPotential", "RawDihedralForceScalingFactor", "RawTotalForceScalingFactor"]:
             self.addGlobalVariable(name, 0.0)
@@ -230,6 +309,85 @@ class DualDeepLearningGaMDProduction(CustomIntegrator):
         self.addConstrainPositions()
         self.addComputePerDof("v", "(x - oldx)/dt")
 
+class DihedralDeepLearningGaMDProduction(CustomIntegrator):
+    def __init__(self, dt_ps: float = 0.002, temperature_K: float = 300.0, params: BoostParams | None = None):
+        super().__init__(dt_ps * unit.picoseconds)
+        if params is None:
+            params = BoostParams(0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        params.clamp()
+        self.addGlobalVariable("collision_rate", 1.0 / unit.picosecond)
+        self.addGlobalVariable("thermal_energy", (unit.BOLTZMANN_CONSTANT_kB * unit.AVOGADRO_CONSTANT_NA * temperature_K * unit.kelvin))
+        self.addGlobalVariable("vscale", 0.0)
+        self.addGlobalVariable("fscale", 0.0)
+        self.addGlobalVariable("noisescale", 0.0)
+        self.addPerDofVariable("oldx", 0.0)
+        self.addUpdateContextState()
+        for name in ["DihedralEnergy","BoostedDihedralEnergy","DihedralBoostPotential","DihedralRefEnergy","DihedralForceScalingFactor",
+                     "TotalEnergy","BoostedTotalEnergy","TotalBoostPotential","TotalRefEnergy"]:
+            self.addGlobalVariable(name, 0.0)
+        for name in ["RawDihedralBoostPotential", "RawTotalBoostPotential", "RawDihedralForceScalingFactor", "RawTotalForceScalingFactor"]:
+            self.addGlobalVariable(name, 0.0)
+        self.addGlobalVariable("boost_scale", 1.0)
+        self.addGlobalVariable("deltaV_abs_max", 0.0)
+        self.addGlobalVariable("RawDeltaV", 0.0)
+        self.addGlobalVariable("DeltaV", 0.0)
+        self.addGlobalVariable("ClampScale", 1.0)
+        self.addGlobalVariable("EffectiveScale", 1.0)
+        self.addGlobalVariable("VminD", float(params.VminD))
+        self.addGlobalVariable("VmaxD", float(params.VmaxD))
+        self.addGlobalVariable("Dihedralk0", params.k0D)
+        self.addGlobalVariable("VminP", float(params.VminP))
+        self.addGlobalVariable("VmaxP", float(params.VmaxP))
+        self.addGlobalVariable("Totalk0", 0.0)
+        self.addGlobalVariable("refED_factor", params.refED_factor)
+        self.addGlobalVariable("refEP_factor", params.refEP_factor)
+        self.addGlobalVariable("TotalForceScalingFactor", 1.0)
+
+        self.addComputeGlobal("DihedralEnergy", "energy3")
+        self.addComputeGlobal("DihedralRefEnergy", "VminD + (VmaxD - VminD)/max(Dihedralk0, %g)" % _EPS)
+        self.beginIfBlock("DihedralRefEnergy > VmaxD + refED_factor*abs(VmaxD)")
+        self.addComputeGlobal("DihedralRefEnergy", "VmaxD")
+        self.endBlock()
+        self.beginIfBlock("DihedralEnergy < DihedralRefEnergy")
+        self.addComputeGlobal("RawDihedralBoostPotential", "0.5*Dihedralk0*(DihedralRefEnergy-DihedralEnergy)^2/max(VmaxD-VminD, %g)" % _EPS)
+        self.addComputeGlobal("RawDihedralForceScalingFactor", "1 - Dihedralk0*(DihedralRefEnergy-DihedralEnergy)/max(VmaxD-VminD, %g)" % _EPS)
+        self.endBlock()
+        self.beginIfBlock("DihedralEnergy >= DihedralRefEnergy")
+        self.addComputeGlobal("RawDihedralBoostPotential", "0.0")
+        self.addComputeGlobal("RawDihedralForceScalingFactor", "1.0")
+        self.endBlock()
+        self.addComputeGlobal("RawDeltaV", "boost_scale*RawDihedralBoostPotential")
+        self.addComputeGlobal("ClampScale", "1.0")
+        self.beginIfBlock("deltaV_abs_max > 0")
+        self.beginIfBlock("abs(RawDeltaV) > deltaV_abs_max")
+        self.addComputeGlobal("ClampScale", "deltaV_abs_max/abs(RawDeltaV)")
+        self.endBlock()
+        self.endBlock()
+        self.addComputeGlobal("EffectiveScale", "boost_scale*ClampScale")
+        self.addComputeGlobal("DihedralBoostPotential", "EffectiveScale*RawDihedralBoostPotential")
+        self.addComputeGlobal(
+            "DihedralForceScalingFactor",
+            "1 - EffectiveScale*(1 - RawDihedralForceScalingFactor)",
+        )
+        self.addComputeGlobal("BoostedDihedralEnergy", "DihedralEnergy + DihedralBoostPotential")
+        self.addComputeGlobal("DeltaV", "DihedralBoostPotential")
+        self.addComputeGlobal("VminD", "min(DihedralEnergy, VminD)")
+        self.addComputeGlobal("VmaxD", "max(DihedralEnergy, VmaxD)")
+
+        self.addComputeGlobal("vscale", "exp(-dt*collision_rate)")
+        self.addComputeGlobal("fscale", "(1 - vscale)/collision_rate")
+        self.addComputeGlobal("noisescale", "sqrt(thermal_energy*(1 - vscale*vscale))")
+        self.addComputePerDof("oldx", "x")
+        self.addComputePerDof("v", "vscale*v + noisescale*gaussian/sqrt(m)")
+        self.addComputePerDof("v", "v + f0*fscale/m")
+        self.addComputePerDof("v", "v + f1*TotalForceScalingFactor*fscale/m")
+        self.addComputePerDof("v", "v + f2*TotalForceScalingFactor*fscale/m")
+        self.addComputePerDof("v", "v + f4*TotalForceScalingFactor*fscale/m")
+        self.addComputePerDof("v", "v + f3*TotalForceScalingFactor*DihedralForceScalingFactor*fscale/m")
+        self.addComputePerDof("x", "x + dt*v")
+        self.addConstrainPositions()
+        self.addComputePerDof("v", "(x - oldx)/dt")
+
 def make_conventional(dt_ps: float, temperature_K: float, collision_rate_ps: float = 1.0) -> LangevinMiddleIntegrator:
     return LangevinMiddleIntegrator(
         temperature_K * unit.kelvin,
@@ -242,3 +400,9 @@ def make_dual_equil(dt_ps: float, temperature_K: float, params: BoostParams) -> 
 
 def make_dual_prod(dt_ps: float, temperature_K: float, params: BoostParams) -> DualDeepLearningGaMDProduction:
     return DualDeepLearningGaMDProduction(dt_ps=dt_ps, temperature_K=temperature_K, params=params)
+
+def make_dihedral_equil(dt_ps: float, temperature_K: float, params: BoostParams) -> DihedralDeepLearningGaMDEquilibration:
+    return DihedralDeepLearningGaMDEquilibration(dt_ps=dt_ps, temperature_K=temperature_K, params=params)
+
+def make_dihedral_prod(dt_ps: float, temperature_K: float, params: BoostParams) -> DihedralDeepLearningGaMDProduction:
+    return DihedralDeepLearningGaMDProduction(dt_ps=dt_ps, temperature_K=temperature_K, params=params)

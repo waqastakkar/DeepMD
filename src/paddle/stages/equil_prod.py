@@ -14,7 +14,14 @@ from openmm.app import DCDReporter, StateDataReporter, PDBFile
 import openmm as mm
 from paddle.config import SimulationConfig, is_explicit_simtype, ns_to_steps, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation, log_simulation_start
-from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
+from paddle.core.integrators import (
+    make_conventional,
+    make_dihedral_equil,
+    make_dihedral_prod,
+    make_dual_equil,
+    make_dual_prod,
+)
+from paddle.core.params import BoostParams
 from paddle.io.report import CSVLogger, ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
 from paddle.learn.data import load_latent_pca, prepare_pca_inputs, project_pca
@@ -477,6 +484,70 @@ def _apply_safe_mode_overrides(cfg: SimulationConfig) -> None:
     for name in ("heat_report_freq", "density_report_freq", "ebRestartFreq", "prodRestartFreq", "cmdRestartFreq"):
         current = int(getattr(cfg, name))
         setattr(cfg, name, max(1, current * io_scale))
+
+def _normalize_boost_mode(value: object, *, field: str) -> str:
+    if value is None:
+        return "dual"
+    mode = str(value).lower()
+    if "dihedral" in mode and "dual" not in mode and "total" not in mode:
+        return "dihedral"
+    if "dual" in mode or "total" in mode:
+        return "dual"
+    raise ValueError(f"{field} must be 'dual' or 'dihedral', got {value}")
+
+def _resolve_boost_mode(cfg: SimulationConfig) -> str:
+    if bool(getattr(cfg, "dihedral_only", False)):
+        return "dihedral"
+    return _normalize_boost_mode(getattr(cfg, "gamd_boost_mode", None), field="gamd_boost_mode")
+
+def _make_gamd_integrator(stage: str, boost_mode: str, cfg: SimulationConfig, params: BoostParams):
+    dt_ps = _resolve_dt_ps(cfg)
+    if boost_mode == "dual":
+        if stage == "equil":
+            return make_dual_equil(dt_ps=dt_ps, temperature_K=cfg.temperature, params=params)
+        return make_dual_prod(dt_ps=dt_ps, temperature_K=cfg.temperature, params=params)
+    if boost_mode == "dihedral":
+        if stage == "equil":
+            return make_dihedral_equil(dt_ps=dt_ps, temperature_K=cfg.temperature, params=params)
+        return make_dihedral_prod(dt_ps=dt_ps, temperature_K=cfg.temperature, params=params)
+    raise ValueError(f"Unsupported boost mode: {boost_mode}")
+
+def _attach_gamd_integrator(
+    sim,
+    cfg: SimulationConfig,
+    params: BoostParams,
+    stage: str,
+    boost_mode: str,
+):
+    try:
+        integrator = _make_gamd_integrator(stage, boost_mode, cfg, params)
+        _attach_integrator(sim, integrator)
+        return integrator, boost_mode
+    except Exception as exc:
+        if boost_mode != "dual":
+            raise
+        allow_fallback = bool(getattr(cfg, "allow_dual_fallback", False))
+        if not allow_fallback:
+            raise RuntimeError(
+                "Dual-boost GaMD is not supported by this OpenMM build. "
+                "Set allow_dual_fallback=true to fall back to dihedral-only mode."
+            ) from exc
+        fallback_mode = _normalize_boost_mode(getattr(cfg, "fallback_boost_mode", "dihedral"), field="fallback_boost_mode")
+        if fallback_mode == "dual":
+            raise RuntimeError(
+                "Dual-boost GaMD is not supported by this OpenMM build and fallback_boost_mode=dual. "
+                "Set fallback_boost_mode=dihedral or disable dual boost."
+            ) from exc
+        print(
+            "WARNING: Dual-boost GaMD integrator is not supported by this OpenMM build. "
+            "Falling back to dihedral-only mode."
+        )
+        cfg.gamd_boost_mode = fallback_mode
+        cfg.dihedral_only = True
+        params.k0P = 0.0
+        integrator = _make_gamd_integrator(stage, fallback_mode, cfg, params)
+        _attach_integrator(sim, integrator)
+        return integrator, fallback_mode
 
 def _adaptive_stop_status(
     cfg: SimulationConfig,
@@ -959,6 +1030,9 @@ def _run_equil_cycle(
         metrics=metrics,
         model_summary=model_summary,
     )
+    boost_mode = _resolve_boost_mode(cfg)
+    if boost_mode == "dihedral":
+        params.k0P = 0.0
     if not gamd_ready:
         params.k0D = 0.0
         params.k0P = 0.0
@@ -1029,14 +1103,11 @@ def _run_equil_cycle(
     if model_summary is not None:
         bias_plan["model_summary"] = model_summary
 
-    integ = make_dual_equil(dt_ps=_resolve_dt_ps(cfg), temperature_K=cfg.temperature, params=params)
+    integ, boost_mode = _attach_gamd_integrator(sim, cfg, params, stage="equil", boost_mode=boost_mode)
     try:
         integ.setGlobalVariableByName("deltaV_abs_max", float(cfg.deltaV_abs_max))
     except Exception:
         pass
-
-    # ---- NEW: bind the new integrator
-    _attach_integrator(sim, integ)
 
     dcd = equil_dir / f"equil-cycle{cyc:02d}.dcd"
     log = equil_dir / f"equil-cycle{cyc:02d}.log"
@@ -1217,15 +1288,14 @@ def _run_prod_cycle(
     elif bool(getattr(cfg, "safe_mode", False)):
         params.k0D *= 0.5
         params.k0P *= 0.5
-
-    integ = make_dual_prod(dt_ps=_resolve_dt_ps(cfg), temperature_K=cfg.temperature, params=params)
+    boost_mode = _resolve_boost_mode(cfg)
+    if boost_mode == "dihedral":
+        params.k0P = 0.0
+    integ, boost_mode = _attach_gamd_integrator(sim, cfg, params, stage="prod", boost_mode=boost_mode)
     try:
         integ.setGlobalVariableByName("deltaV_abs_max", float(cfg.deltaV_abs_max))
     except Exception:
         pass
-
-    # ---- NEW: bind the new integrator
-    _attach_integrator(sim, integ)
 
     dcd = prod_dir / f"prod-cycle{cyc:02d}.dcd"
     log = prod_dir / f"prod-cycle{cyc:02d}.log"
@@ -1372,6 +1442,7 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     ensure_dir(outdir)
     set_global_seed(cfg.seed)
 
+    density_done = False
     _apply_safe_mode_overrides(cfg)
     dt_ps = _resolve_dt_ps(cfg)
     if getattr(cfg, "safe_mode", False):
@@ -1404,6 +1475,11 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
         loaded = _load_cmd_checkpoint_if_any(sim, outdir)
         _ensure_initial_velocities(sim, cfg.temperature)
         _check_state_finite(sim, cfg, "init", outdir)
+        if str(getattr(cfg, "gamd_start_stage", "after_density")) == "after_density":
+            if not cfg.do_density_equil:
+                raise RuntimeError("gamd_start_stage=after_density requires do_density_equil=true.")
+            run_density_equil(cfg, sim, outdir)
+            density_done = True
     if not loaded:
         opts_nvt = _options_from_cfg(cfg, add_barostat=False)
         integ_nvt = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
@@ -1436,7 +1512,10 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
         else:
             sim = sim_nvt
         run_density_equil(cfg, sim, outdir)
+        density_done = True
         _check_state_finite(sim, cfg, "prep", outdir)
+    if str(getattr(cfg, "gamd_start_stage", "after_density")) == "after_density" and not density_done:
+        raise RuntimeError("GaMD configured to start after density equilibration, but density stage did not run.")
 
     write_run_manifest(outdir, {
         "stage": "equil+prod",
