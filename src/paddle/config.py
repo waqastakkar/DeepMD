@@ -188,6 +188,10 @@ class SimulationConfig:
     k0_initial: float = 0.5
     k0_min: float = 0.1
     k0_max: float = 0.9
+    k_min: Optional[float] = None
+    k_max: Optional[float] = None
+    sigma0D: Optional[float] = None
+    sigma0P: Optional[float] = None
 
     gaussian_skew_good: float = 0.2
     gaussian_excess_kurtosis_good: float = 0.2
@@ -215,6 +219,7 @@ class SimulationConfig:
     ewaldErrorTolerance: float = 5e-4
     useDispersionCorrection: bool = True
     rigidWater: bool = True
+    gamd_diag_enabled: bool = True
 
     seed: int = 2025
     outdir: str = "out"
@@ -238,6 +243,13 @@ class SimulationConfig:
         _assert_range("cmd_ns", self.cmd_ns, 1e-12)
         _assert_range("equil_ns_per_cycle", self.equil_ns_per_cycle, 1e-12)
         _assert_range("prod_ns_per_cycle", self.prod_ns_per_cycle, 1e-12)
+        if self.k_min is not None and self.k_max is not None:
+            if self.k_min > self.k_max:
+                raise ValueError(f"k_min must be <= k_max, got {(self.k_min, self.k_max)}")
+        if self.sigma0D is not None:
+            _assert_range("sigma0D", self.sigma0D, 0.0)
+        if self.sigma0P is not None:
+            _assert_range("sigma0P", self.sigma0P, 0.0)
         _assert_range("minimize_tolerance_kj_per_mol", self.minimize_tolerance_kj_per_mol, 0.0)
         _assert_range("heat_ns", self.heat_ns, 0.0)
         _assert_range("heat_t_start", self.heat_t_start, 0.0, 5000.0)

@@ -34,8 +34,17 @@ def read_prep_logs(prep_dir: str | Path) -> pd.DataFrame:
         df = pd.read_csv(p, compression="infer")
 
         # Coerce expected columns to numeric
-        for col, as_type in [("step", "int64"), ("Etot_kJ", "float64"),
-                             ("Edih_kJ", "float64"), ("T_K", "float64")]:
+        for col, as_type in [
+            ("step", "int64"),
+            ("Etot_kJ", "float64"),
+            ("Edih_kJ", "float64"),
+            ("E_potential_kJ", "float64"),
+            ("E_bond_kJ", "float64"),
+            ("E_angle_kJ", "float64"),
+            ("E_dihedral_kJ", "float64"),
+            ("E_nonbonded_kJ", "float64"),
+            ("T_K", "float64"),
+        ]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -188,7 +197,11 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--window", type=int, default=128)
     ap.add_argument("--stride", type=int, default=4)
-    ap.add_argument("--features", type=str, default="Etot_kJ,Edih_kJ,T_K")
+    ap.add_argument(
+        "--features",
+        type=str,
+        default="E_potential_kJ,E_bond_kJ,E_angle_kJ,E_dihedral_kJ,E_nonbonded_kJ,T_K",
+    )
     ap.add_argument("--target", type=str, default="Etot_kJ")
     ap.add_argument("--horizon", type=int, default=1)
     ap.add_argument("--norm", type=str, default="zscore", choices=["zscore", "minmax", "none"])

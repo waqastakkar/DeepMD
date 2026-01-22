@@ -10,6 +10,7 @@ from inspect import signature
 import os
 
 from openmm import Platform, unit
+import openmm as mm
 from openmm.app import AmberInpcrdFile, AmberPrmtopFile, Simulation
 
 
@@ -99,6 +100,20 @@ def build_system(
     return prmtop, system
 
 
+def assign_force_groups(system) -> None:
+    for force in system.getForces():
+        if isinstance(force, mm.HarmonicBondForce):
+            force.setForceGroup(1)
+        elif isinstance(force, mm.HarmonicAngleForce):
+            force.setForceGroup(2)
+        elif isinstance(force, (mm.PeriodicTorsionForce, mm.RBTorsionForce, mm.CMAPTorsionForce, mm.CustomTorsionForce)):
+            force.setForceGroup(3)
+        elif isinstance(force, mm.NonbondedForce):
+            force.setForceGroup(4)
+        else:
+            force.setForceGroup(0)
+
+
 def create_simulation(parm_file: str, crd_file: str, integrator, options: EngineOptions):
     prmtop, system = build_system(
         parm_file,
@@ -119,6 +134,8 @@ def create_simulation(parm_file: str, crd_file: str, integrator, options: Engine
             )
         )
         print("Explicit solvent detected → MonteCarloBarostat enabled")
+
+    assign_force_groups(system)
 
     plat, props = get_platform(
         options.platform_name,
