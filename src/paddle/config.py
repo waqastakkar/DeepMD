@@ -338,6 +338,9 @@ class SimulationConfig:
         if dupes:
             raise ValueError(f"feature_columns contains duplicates: {sorted(dupes)}")
 
+        from paddle.policy import validate_config as validate_policy_config
+
+        validate_policy_config(self)
         Path(self.outdir).mkdir(parents=True, exist_ok=True)
         if self.safe_mode or getattr(self, "validate_config", False):
             _sanity_check_timesteps(self)

@@ -21,16 +21,77 @@ _TAIL_RISK_FREEZE = 0.05
 _EPS = 1e-12
 
 
-def _get_value(source: object, key: str) -> Optional[float]:
+def _get_value(
+    source: object,
+    key: str,
+    default: Optional[float] = None,
+    required: bool = False,
+) -> Optional[float]:
     if source is None:
-        return None
+        if required and default is None:
+            raise ValueError(f"Missing required config key: {key}. Please set it in YAML.")
+        return float(default) if default is not None else None
     if isinstance(source, Mapping):
-        if key in source:
-            return float(source[key])
-        return None
-    if hasattr(source, key):
-        return float(getattr(source, key))
+        if key not in source or source[key] is None:
+            if required and default is None:
+                raise ValueError(f"Missing required config key: {key}. Please set it in YAML.")
+            return float(default) if default is not None else None
+        return float(source[key])
+    if not hasattr(source, key) or getattr(source, key) is None:
+        if required and default is None:
+            raise ValueError(f"Missing required config key: {key}. Please set it in YAML.")
+        return float(default) if default is not None else None
+    return float(getattr(source, key))
+
+
+def _missing_keys(source: object, keys: list[str]) -> list[str]:
+    missing: list[str] = []
+    for key in keys:
+        if source is None:
+            missing.append(key)
+            continue
+        if isinstance(source, Mapping):
+            if key not in source or source[key] is None:
+                missing.append(key)
+            continue
+        if not hasattr(source, key) or getattr(source, key) is None:
+            missing.append(key)
+    return missing
+
+
+def _infer_boost_mode(cfg) -> Optional[str]:
+    for key in ("gamd_mode", "gamd_boost_mode", "boost_mode"):
+        if hasattr(cfg, key):
+            value = str(getattr(cfg, key)).lower()
+            if "dihedral" in value and "dual" not in value and "total" not in value:
+                return "dihedral"
+            if "dual" in value or "total" in value:
+                return "dual"
+    for key in ("dihedral_only", "dihedral_boost_only", "gamd_dihedral_only"):
+        if hasattr(cfg, key):
+            return "dihedral" if bool(getattr(cfg, key)) else "dual"
     return None
+
+
+def validate_config(cfg) -> None:
+    if not bool(getattr(cfg, "controller_enabled", True)):
+        return
+    required_keys = [
+        "k0_initial",
+        "k0_min",
+        "k0_max",
+        "deltaV_damp_factor",
+        "gaussian_skew_good",
+        "gaussian_excess_kurtosis_good",
+        "gaussian_tail_risk_good",
+    ]
+    missing = _missing_keys(cfg, required_keys)
+    if missing:
+        missing_list = ", ".join(missing)
+        raise ValueError(
+            "Missing required config keys for GaMD controller: "
+            f"{missing_list}. Please set them in YAML."
+        )
 
 
 def _metric(metrics: Mapping[str, object], *keys: str) -> Optional[float]:
@@ -356,7 +417,22 @@ def propose_boost_params(
     k0P = _apply_k_bounds(k0P, vmin_p, vmax_p, k_min, k_max, k0_min, k0_max)
 
     deltaV_std = _metric(metrics, "deltaV_std")
-    deltaV_std_max = _get_value(cfg, "deltaV_std_max")
+    default_deltaV_std_max = None
+    if bool(getattr(cfg, "controller_enabled", True)):
+        # Default to dual-boost threshold when mode is unspecified in config.
+        boost_mode = _infer_boost_mode(cfg)
+        if boost_mode == "dihedral":
+            default_deltaV_std_max = 6.0
+        elif boost_mode == "dual":
+            default_deltaV_std_max = 10.0
+        else:
+            default_deltaV_std_max = 10.0
+    deltaV_std_max = _get_value(
+        cfg,
+        "deltaV_std_max",
+        default=default_deltaV_std_max,
+        required=bool(getattr(cfg, "controller_enabled", True)),
+    )
     deltaV_damp_factor = float(getattr(cfg, "deltaV_damp_factor", 0.5))
     if deltaV_std_max is not None and deltaV_std is not None and deltaV_std > float(deltaV_std_max):
         k0D = _clamp(k0D * deltaV_damp_factor, k0_min, k0_max)
