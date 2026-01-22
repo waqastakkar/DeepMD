@@ -17,7 +17,7 @@ from paddle.core.engine import EngineOptions, create_simulation, log_simulation_
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import CSVLogger, ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
-from paddle.learn.data import load_latent_pca, project_pca
+from paddle.learn.data import load_latent_pca, prepare_pca_inputs, project_pca
 from paddle.stages.prep import run_density_equil, run_heating, run_minimization, transfer_state
 from paddle.policy import (
     gaussian_confidence,
@@ -478,16 +478,37 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
     dihedral_samples: list[float] = []
     total_samples: list[float] = []
     temperature_samples: list[float] = []
+    feature_samples = {
+        "E_potential_kJ": [],
+        "E_bond_kJ": [],
+        "E_angle_kJ": [],
+        "E_dihedral_kJ": [],
+        "E_nonbonded_kJ": [],
+        "T_K": [],
+        "Etot_kJ": [],
+        "Edih_kJ": [],
+    }
     for _ in range(n):
         sim.step(interval)
+        E_bond = sim.context.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        E_angle = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         Ed = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        E_nonbonded = sim.context.getState(getEnergy=True, groups={4}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         state_total = sim.context.getState(getEnergy=True, getVelocities=True)
         Ep = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         dihedral_samples.append(Ed)
         total_samples.append(Ep)
+        feature_samples["E_potential_kJ"].append(Ep)
+        feature_samples["E_bond_kJ"].append(E_bond)
+        feature_samples["E_angle_kJ"].append(E_angle)
+        feature_samples["E_dihedral_kJ"].append(Ed)
+        feature_samples["E_nonbonded_kJ"].append(E_nonbonded)
+        feature_samples["Etot_kJ"].append(Ep)
+        feature_samples["Edih_kJ"].append(Ed)
         temp = _compute_temperature_k(state_total, sim)
         if temp is not None:
             temperature_samples.append(float(temp))
+            feature_samples["T_K"].append(float(temp))
         if Ed < vmin_d: vmin_d = Ed
         if Ed > vmax_d: vmax_d = Ed
         if Ep < vmin_p: vmin_p = Ep
@@ -514,18 +535,26 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
         dihedral_samples,
         total_samples,
         temperature_samples,
+        feature_samples,
     )
 
-def _resolve_kept_feature_indices(payload: dict[str, object]) -> Optional[list[int]]:
-    kept = payload.get("kept_feature_indices")
-    if kept is not None:
-        return [int(i) for i in kept]
-    original_dim = payload.get("original_dim")
-    if original_dim is None:
+def _build_feature_matrix(
+    feature_samples: dict[str, list[float]],
+    feature_columns: list[str],
+) -> Optional[np.ndarray]:
+    missing = [name for name in feature_columns if name not in feature_samples]
+    if missing:
+        raise ValueError(
+            f"Missing feature samples for columns: {missing}. "
+            "Update feature_columns to match available energy/temperature fields or retrain the PCA."
+        )
+    lengths = [len(feature_samples[name]) for name in feature_columns]
+    if not lengths or min(lengths) <= 0:
         return None
-    dropped = payload.get("dropped_constant_features", [])
-    dropped_set = {int(i) for i in dropped}
-    return [i for i in range(int(original_dim)) if i not in dropped_set]
+    min_len = min(lengths)
+    return np.column_stack([
+        np.asarray(feature_samples[name][:min_len], dtype=float) for name in feature_columns
+    ])
 
 
 def _validate_pca_projection_inputs(
@@ -602,7 +631,7 @@ def _run_equil_cycle(
     equil_dir = outdir / "equil"
     ensure_dir(equil_dir)
 
-    VminD, VmaxD, VminP, VmaxP, VavgD, VavgP, VstdD, VstdP, dihedral_samples, total_samples, temperature_samples = _estimate_bounds(
+    VminD, VmaxD, VminP, VmaxP, VavgD, VavgP, VstdD, VstdP, dihedral_samples, total_samples, temperature_samples, feature_samples = _estimate_bounds(
         sim, steps=min(10000, cfg.ntebpercyc // 10), interval=max(10, cfg.ebRestartFreq)
     )
     etot_mean = float(np.mean(total_samples)) if total_samples else 0.0
@@ -643,16 +672,12 @@ def _run_equil_cycle(
     latent_metrics: Optional[dict[str, float]] = None
     latent_explore_std: Optional[float] = None
     if latent_pca is not None:
+        feature_columns = list(cfg.feature_columns)
         mean, components, payload = latent_pca
-        kept_feature_indices = _resolve_kept_feature_indices(payload)
         original_dim = payload.get("original_dim")
-        min_len = min(len(total_samples), len(dihedral_samples), len(temperature_samples))
-        if min_len > 0:
-            X_cycle = np.column_stack([
-                np.asarray(total_samples[:min_len], dtype=float),
-                np.asarray(dihedral_samples[:min_len], dtype=float),
-                np.asarray(temperature_samples[:min_len], dtype=float),
-            ])
+        X_cycle = _build_feature_matrix(feature_samples, feature_columns)
+        if X_cycle is not None:
+            X_cycle, kept_feature_indices = prepare_pca_inputs(X_cycle, feature_columns, payload)
             if bool(getattr(cfg, "safe_mode", False) or getattr(cfg, "validate_config", False)):
                 _validate_pca_projection_inputs(
                     X_cycle,

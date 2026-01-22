@@ -174,6 +174,55 @@ def project_pca(
         X = X[:, kept_feature_indices]
     return (X - mean) @ components.T
 
+def resolve_kept_feature_indices(payload: dict[str, object]) -> Optional[list[int]]:
+    kept = payload.get("kept_feature_indices")
+    if kept is not None:
+        return [int(i) for i in kept]
+    original_dim = payload.get("original_dim")
+    if original_dim is None:
+        return None
+    dropped = payload.get("dropped_constant_features", [])
+    dropped_set = {int(i) for i in dropped}
+    return [i for i in range(int(original_dim)) if i not in dropped_set]
+
+def prepare_pca_inputs(
+    X: np.ndarray,
+    feature_columns: Sequence[str],
+    payload: dict[str, object],
+) -> tuple[np.ndarray, Optional[list[int]]]:
+    X = np.asarray(X, dtype=float)
+    feature_names = payload.get("feature_names")
+    kept_feature_indices = resolve_kept_feature_indices(payload)
+    expected_dim = None
+    if feature_names is not None:
+        if not isinstance(feature_names, list) or not all(isinstance(n, str) for n in feature_names):
+            raise ValueError("latent_pca feature_names must be a list of strings.")
+        expected_dim = len(feature_names)
+    elif kept_feature_indices:
+        expected_dim = max(kept_feature_indices) + 1
+    elif payload.get("original_dim") is not None:
+        expected_dim = int(payload["original_dim"])
+
+    if expected_dim is not None and X.shape[1] != expected_dim:
+        raise ValueError(
+            "PCA projection input dimension mismatch: "
+            f"X has {X.shape[1]} features but PCA expects {expected_dim}. "
+            "Retrain the PCA with matching feature_columns or update feature_columns to match the training data."
+        )
+
+    if feature_names is not None:
+        name_to_index = {name: idx for idx, name in enumerate(feature_columns)}
+        missing = [name for name in feature_names if name not in name_to_index]
+        if missing:
+            raise ValueError(
+                "PCA feature_names not found in feature_columns: "
+                f"{missing}. Retrain the PCA with matching feature_columns or update feature_columns."
+            )
+        order = [name_to_index[name] for name in feature_names]
+        X = X[:, order]
+
+    return X, kept_feature_indices
+
 def load_latent_pca(path: str | Path) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     mean = np.asarray(payload["mean"], dtype=float)
