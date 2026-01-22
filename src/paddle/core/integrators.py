@@ -70,7 +70,10 @@ class DualDeepLearningGaMDEquilibration(CustomIntegrator):
         self.addComputeGlobal("VminD", "min(DihedralEnergy, VminD)")
         self.addComputeGlobal("VmaxD", "max(DihedralEnergy, VmaxD)")
 
-        self.addComputeGlobal("TotalEnergy", "energy1+energy2+energy3+energy4")
+        self.addComputeGlobal("TotalEnergy", "energy1")
+        self.addComputeGlobal("TotalEnergy", "TotalEnergy + energy2")
+        self.addComputeGlobal("TotalEnergy", "TotalEnergy + energy3")
+        self.addComputeGlobal("TotalEnergy", "TotalEnergy + energy4")
         self.addComputeGlobal("TotalRefEnergy", "VminP + (VmaxP - VminP)/max(Totalk0, %g)" % _EPS)
         self.beginIfBlock("TotalRefEnergy > VmaxP + refEP_factor*abs(VmaxP)")
         self.addComputeGlobal("TotalRefEnergy", "VmaxP")
@@ -139,7 +142,10 @@ class DualDeepLearningGaMDProduction(CustomIntegrator):
         self.endBlock()
         self.addComputeGlobal("BoostedDihedralEnergy", "DihedralEnergy + DihedralBoostPotential")
 
-        self.addComputeGlobal("TotalEnergy", "energy1+energy2+energy3+energy4")
+        self.addComputeGlobal("TotalEnergy", "energy1")
+        self.addComputeGlobal("TotalEnergy", "TotalEnergy + energy2")
+        self.addComputeGlobal("TotalEnergy", "TotalEnergy + energy3")
+        self.addComputeGlobal("TotalEnergy", "TotalEnergy + energy4")
         self.addComputeGlobal("TotalRefEnergy", "VminP + (VmaxP - VminP)/max(Totalk0, %g)" % _EPS)
         self.beginIfBlock("TotalRefEnergy > VmaxP + refEP_factor*abs(VmaxP)")
         self.addComputeGlobal("TotalRefEnergy", "VmaxP")
