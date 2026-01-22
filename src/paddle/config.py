@@ -142,6 +142,9 @@ class SimulationConfig:
     temperature: float = 300.0
     dt: Optional[float] = 0.002
     safe_mode: bool = False
+    debug_safe_dt_fs: float = 1.0
+    debug_disable_gamd: bool = False
+    debug_disable_barostat: bool = False
     validate_config: bool = False
     cmd_ns: float = 5.0
     equil_ns_per_cycle: float = 5.0
@@ -159,7 +162,7 @@ class SimulationConfig:
     cmdRestartFreq: int = 100
 
     do_minimize: bool = True
-    minimize_max_iter: int = 5000
+    minimize_max_iter: int = 20000
     minimize_tolerance_kj_per_mol: float = 10.0
 
     do_heating: bool = True
@@ -200,6 +203,10 @@ class SimulationConfig:
     k_max: Optional[float] = None
     sigma0D: Optional[float] = None
     sigma0P: Optional[float] = None
+    gamd_ramp_ns: float = 0.5
+    deltaV_abs_max: float = 2000.0
+    gamd_stable_conf_min: float = 0.6
+    gamd_stable_min_cycles: int = 1
 
     gaussian_skew_good: float = 0.2
     gaussian_excess_kurtosis_good: float = 0.2
@@ -250,6 +257,7 @@ class SimulationConfig:
         if self.dt is None:
             self.dt = 0.002
         _assert_range("dt", self.dt, 1e-9)
+        _assert_range("debug_safe_dt_fs", self.debug_safe_dt_fs, 1e-6)
         _assert_range("cmd_ns", self.cmd_ns, 1e-12)
         _assert_range("equil_ns_per_cycle", self.equil_ns_per_cycle, 1e-12)
         _assert_range("prod_ns_per_cycle", self.prod_ns_per_cycle, 1e-12)
@@ -285,6 +293,11 @@ class SimulationConfig:
         _assert_range("k0_max", self.k0_max, 0.0, 1.0)
         if self.k0_min > self.k0_max:
             raise ValueError("k0_min must be <= k0_max")
+        _assert_range("gamd_ramp_ns", self.gamd_ramp_ns, 0.0)
+        _assert_range("deltaV_abs_max", self.deltaV_abs_max, 1e-12)
+        _assert_range("gamd_stable_conf_min", self.gamd_stable_conf_min, 0.0, 1.0)
+        if not isinstance(self.gamd_stable_min_cycles, int) or self.gamd_stable_min_cycles < 0:
+            raise ValueError("gamd_stable_min_cycles must be a non-negative integer")
 
         _assert_range("gaussian_skew_good", self.gaussian_skew_good, 0.0, 10.0)
         _assert_range("gaussian_excess_kurtosis_good", self.gaussian_excess_kurtosis_good, 0.0, 10.0)
@@ -313,6 +326,9 @@ class SimulationConfig:
         if not isinstance(self.controller_enabled, bool):
             raise ValueError("controller_enabled must be a bool")
         for name in ("do_minimize", "do_heating", "do_density_equil"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool")
+        for name in ("debug_disable_gamd", "debug_disable_barostat"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a bool")
 
@@ -524,6 +540,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--simType", type=str, default=None)
     ap.add_argument("--nbCutoff", type=float, default=None)
     ap.add_argument("--temperature", type=float, default=None)
+    ap.add_argument("--debug_safe_dt_fs", type=float, default=None)
+    ap.add_argument("--debug_disable_gamd", action="store_true", default=None)
+    ap.add_argument("--debug_disable_barostat", action="store_true", default=None)
     ap.add_argument("--cmd_ns", type=float, default=None)
     ap.add_argument("--equil_ns_per_cycle", type=float, default=None)
     ap.add_argument("--prod_ns_per_cycle", type=float, default=None)
@@ -558,6 +577,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--prodRestartFreq", type=int, default=None)
     ap.add_argument("--refEP_factor", type=float, default=None)
     ap.add_argument("--refED_factor", type=float, default=None)
+    ap.add_argument("--gamd_ramp_ns", type=float, default=None)
+    ap.add_argument("--deltaV_abs_max", type=float, default=None)
+    ap.add_argument("--gamd_stable_conf_min", type=float, default=None)
+    ap.add_argument("--gamd_stable_min_cycles", type=int, default=None)
     ap.add_argument("--platform", type=str, default=None)
     ap.add_argument("--precision", type=str, default=None)
     ap.add_argument("--require_gpu", action="store_true", default=None)
