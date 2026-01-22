@@ -40,6 +40,7 @@ def main() -> None:
         precision=args.precision,
         cuda_precision=args.precision,
         add_barostat="explicit" in args.sim_type,
+        barostat_temperature_kelvin=300.0,
     )
 
     integ = make_conventional(dt_ps=0.002, temperature_K=300.0, collision_rate_ps=1.0)

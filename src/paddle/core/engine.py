@@ -29,6 +29,7 @@ class EngineOptions:
     add_barostat: bool = False
     barostat_pressure_atm: float = 1.0
     barostat_interval: int = 25
+    barostat_temperature_kelvin: float = 300.0
     ewald_error_tolerance: float = 5e-4
     use_dispersion_correction: bool = True
     rigid_water: bool = True
@@ -128,7 +129,7 @@ def create_simulation(parm_file: str, crd_file: str, integrator, options: Engine
         system.addForce(
             MonteCarloBarostat(
                 options.barostat_pressure_atm * unit.atmosphere,
-                300.0 * unit.kelvin,
+                options.barostat_temperature_kelvin * unit.kelvin,
                 options.barostat_interval,
             )
         )

@@ -37,6 +37,7 @@ class GraphBatch:
     frame_ids: np.ndarray
     global_features: Optional[np.ndarray] = None
     labels: Optional[Dict[str, np.ndarray]] = None
+    sequence_len: Optional[int] = None
 
 
 @dataclass
@@ -148,7 +149,7 @@ class GraphBuilder:
         )
 
 
-def batch_graphs(frames: Sequence[GraphFrame]) -> GraphBatch:
+def batch_graphs(frames: Sequence[GraphFrame], sequence_len: Optional[int] = None) -> GraphBatch:
     node_features = []
     positions = []
     edge_index = []
@@ -185,6 +186,7 @@ def batch_graphs(frames: Sequence[GraphFrame]) -> GraphBatch:
         frame_ids=np.concatenate(frame_ids, axis=0),
         global_features=None if not global_features else np.stack(global_features, axis=0),
         labels=None if not labels else {k: np.stack(v, axis=0) for k, v in labels.items()},
+        sequence_len=sequence_len,
     )
     return batch
 
@@ -439,7 +441,7 @@ class TrajectoryWindowDataset:
                 count += 1
             if count == 0:
                 break
-            batch = batch_graphs(batch_frames)
+            batch = batch_graphs(batch_frames, sequence_len=self.sequence_len)
             yield batch, {k: np.stack(v, axis=0) for k, v in batch_labels.items()}
 
 
@@ -527,13 +529,14 @@ class SaliencyAnalyzer:
 
 
 def _batch_to_tensor_inputs(batch: GraphBatch) -> Dict[str, tf.Tensor]:
+    sequence_len = batch.sequence_len if batch.sequence_len is not None else 1
     return {
         "node_features": tf.convert_to_tensor(batch.node_features, dtype=tf.float32),
         "positions": tf.convert_to_tensor(batch.positions, dtype=tf.float32),
         "edge_index": tf.convert_to_tensor(batch.edge_index, dtype=tf.int32),
         "edge_features": tf.convert_to_tensor(batch.edge_features, dtype=tf.float32),
         "frame_ids": tf.convert_to_tensor(batch.frame_ids, dtype=tf.int32),
-        "sequence_len": tf.convert_to_tensor(1, dtype=tf.int32),
+        "sequence_len": tf.convert_to_tensor(sequence_len, dtype=tf.int32),
     }
 
 

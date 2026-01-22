@@ -25,6 +25,7 @@ def _options_from_cfg(cfg: SimulationConfig, *, add_barostat: bool) -> EngineOpt
         add_barostat=add_barostat and is_explicit_simtype(cfg.simType),
         barostat_pressure_atm=cfg.pressure_atm,
         barostat_interval=cfg.barostat_interval,
+        barostat_temperature_kelvin=cfg.temperature,
         ewald_error_tolerance=cfg.ewaldErrorTolerance,
         use_dispersion_correction=cfg.useDispersionCorrection,
         rigid_water=cfg.rigidWater,

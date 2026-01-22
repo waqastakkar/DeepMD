@@ -213,7 +213,7 @@ def _make_gamd_diagnostic_sampler(sim, integ, logger: CSVLogger, ml_logger: Opti
     zero_dihedral = {"count": 0, "warned": False}
 
     def sample() -> None:
-        state_total = sim.context.getState(getEnergy=True, getVelocities=True, groups={1, 2, 3, 4})
+        state_total = sim.context.getState(getEnergy=True, getVelocities=True)
         E_potential = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         temperature = _compute_temperature_k(state_total, sim)
         density = _compute_density_g_per_ml(sim, state_total, total_mass)
@@ -481,7 +481,7 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
     for _ in range(n):
         sim.step(interval)
         Ed = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-        state_total = sim.context.getState(getEnergy=True, getVelocities=True, groups={1, 2, 3, 4})
+        state_total = sim.context.getState(getEnergy=True, getVelocities=True)
         Ep = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         dihedral_samples.append(Ed)
         total_samples.append(Ep)
@@ -577,6 +577,7 @@ def _options_from_cfg(cfg: SimulationConfig, *, add_barostat: bool) -> EngineOpt
         add_barostat=add_barostat and is_explicit_simtype(cfg.simType),
         barostat_pressure_atm=cfg.pressure_atm,
         barostat_interval=cfg.barostat_interval,
+        barostat_temperature_kelvin=cfg.temperature,
         ewald_error_tolerance=cfg.ewaldErrorTolerance,
         use_dispersion_correction=cfg.useDispersionCorrection,
         rigid_water=cfg.rigidWater,
