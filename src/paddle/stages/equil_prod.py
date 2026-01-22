@@ -4,8 +4,10 @@ stages/equil_prod.py — Equilibration (dual-boost) + Production
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
+import math
 import numpy as np
 from openmm import XmlSerializer, unit
 from openmm.app import DCDReporter, StateDataReporter
@@ -13,7 +15,7 @@ import openmm as mm
 from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation, log_simulation_start
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
-from paddle.io.report import ensure_dir, write_run_manifest, append_metrics, write_json
+from paddle.io.report import CSVLogger, ensure_dir, write_run_manifest, append_metrics, write_json
 from paddle.io.restart import RestartRecord, read_restart, write_restart, record_to_boost_params, validate_against_state
 from paddle.learn.data import load_latent_pca, project_pca
 from paddle.stages.prep import run_density_equil, run_heating, run_minimization, transfer_state
@@ -34,6 +36,7 @@ from paddle.validate.metrics import (
 )
 
 _KB_KJ_MOL_K = 0.008314462618
+_EPS = 1e-12
 
 # ---- NEW: helper to bind any newly created integrator to the existing Context
 def _attach_integrator(sim, integrator) -> None:
@@ -68,18 +71,66 @@ def _attach_integrator(sim, integrator) -> None:
     sim.integrator = integrator
     sim.context = new_ctx
 
-def _assign_force_groups(sim) -> None:
-    for force in sim.system.getForces():
-        if isinstance(force, mm.HarmonicBondForce):
-            force.setForceGroup(1)
-        elif isinstance(force, mm.HarmonicAngleForce):
-            force.setForceGroup(2)
-        elif isinstance(force, (mm.PeriodicTorsionForce, mm.CustomTorsionForce, mm.RBTorsionForce, mm.CMAPTorsionForce)):
-            force.setForceGroup(3)
-        elif isinstance(force, mm.NonbondedForce):
-            force.setForceGroup(4)
-        else:
-            force.setForceGroup(0)
+@dataclass
+class RunningMoments:
+    count: int = 0
+    mean: float = 0.0
+    M2: float = 0.0
+    M3: float = 0.0
+    M4: float = 0.0
+    min: float = float("inf")
+    max: float = float("-inf")
+    tail_count: int = 0
+
+    def update(self, x: float) -> None:
+        n1 = self.count
+        self.count += 1
+        delta = x - self.mean
+        delta_n = delta / self.count
+        delta_n2 = delta_n * delta_n
+        term1 = delta * delta_n * n1
+        self.mean += delta_n
+        self.M4 += term1 * delta_n2 * (self.count * self.count - 3 * self.count + 3) + 6 * delta_n2 * self.M2 - 4 * delta_n * self.M3
+        self.M3 += term1 * delta_n * (self.count - 2) - 3 * delta_n * self.M2
+        self.M2 += term1
+        self.min = min(self.min, x)
+        self.max = max(self.max, x)
+        std = self.std()
+        if std > 0.0:
+            z = (x - self.mean) / std
+            if abs(z) > 3.0:
+                self.tail_count += 1
+
+    def std(self) -> float:
+        if self.count <= 0:
+            return 0.0
+        return math.sqrt(self.M2 / self.count)
+
+    def skewness(self) -> float:
+        if self.count <= 1 or self.M2 <= 0.0:
+            return 0.0
+        return (math.sqrt(self.count) * self.M3) / (self.M2 ** 1.5)
+
+    def excess_kurtosis(self) -> float:
+        if self.count <= 1 or self.M2 <= 0.0:
+            return 0.0
+        return (self.count * self.M4) / (self.M2 * self.M2) - 3.0
+
+    def tail_risk(self) -> float:
+        if self.count <= 0:
+            return 0.0
+        return self.tail_count / float(self.count)
+
+    def snapshot(self) -> dict[str, float]:
+        return {
+            "mean": self.mean if self.count > 0 else 0.0,
+            "std": self.std(),
+            "min": self.min if self.count > 0 else 0.0,
+            "max": self.max if self.count > 0 else 0.0,
+            "skewness": self.skewness(),
+            "excess_kurtosis": self.excess_kurtosis(),
+            "tail_risk": self.tail_risk(),
+        }
 
 def _compute_temperature_k(state, sim) -> Optional[float]:
     try:
@@ -138,6 +189,82 @@ def _make_reweight_sampler(sim, integ, deltaV_samples: list[float], temperature_
         if temp is not None:
             temperature_samples.append(float(temp))
     return sample, state
+
+
+def _make_gamd_diagnostic_sampler(sim, integ, logger: CSVLogger):
+    stats_d = RunningMoments()
+    stats_p = RunningMoments()
+
+    def sample() -> None:
+        state_total = sim.context.getState(getEnergy=True)
+        E_potential = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        E_bond = sim.context.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        E_angle = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        E_dihedral = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        E_nonbonded = sim.context.getState(getEnergy=True, groups={4}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+
+        stats_d.update(float(E_dihedral))
+        stats_p.update(float(E_potential))
+        stats_d_snap = stats_d.snapshot()
+        stats_p_snap = stats_p.snapshot()
+
+        Dref = float(integ.getGlobalVariableByName("DihedralRefEnergy"))
+        Tref = float(integ.getGlobalVariableByName("TotalRefEnergy"))
+        Dboost = float(integ.getGlobalVariableByName("DihedralBoostPotential"))
+        Tboost = float(integ.getGlobalVariableByName("TotalBoostPotential"))
+        VminD = float(integ.getGlobalVariableByName("VminD"))
+        VmaxD = float(integ.getGlobalVariableByName("VmaxD"))
+        VminP = float(integ.getGlobalVariableByName("VminP"))
+        VmaxP = float(integ.getGlobalVariableByName("VmaxP"))
+        k0D = float(integ.getGlobalVariableByName("Dihedralk0"))
+        k0P = float(integ.getGlobalVariableByName("Totalk0"))
+        kD = k0D / max(VmaxD - VminD, _EPS)
+        kP = k0P / max(VmaxP - VminP, _EPS)
+
+        logger.writerow({
+            "step": int(getattr(sim, "currentStep", 0)),
+            "E_potential_kJ": float(E_potential),
+            "E_bond_kJ": float(E_bond),
+            "E_angle_kJ": float(E_angle),
+            "E_dihedral_kJ": float(E_dihedral),
+            "E_nonbonded_kJ": float(E_nonbonded),
+            "DihedralRef_kJ": Dref,
+            "TotalRef_kJ": Tref,
+            "Dihedral_k": kD,
+            "Total_k": kP,
+            "DihedralBoost_kJ": Dboost,
+            "TotalBoost_kJ": Tboost,
+            "BoostedDihedral_kJ": float(E_dihedral) + Dboost,
+            "BoostedTotal_kJ": float(E_potential) + Tboost,
+            "VminD_kJ": VminD,
+            "VmaxD_kJ": VmaxD,
+            "VminP_kJ": VminP,
+            "VmaxP_kJ": VmaxP,
+            "Dihedral_mean_kJ": stats_d_snap["mean"],
+            "Dihedral_std_kJ": stats_d_snap["std"],
+            "Dihedral_min_kJ": stats_d_snap["min"],
+            "Dihedral_max_kJ": stats_d_snap["max"],
+            "Dihedral_skewness": stats_d_snap["skewness"],
+            "Dihedral_excess_kurtosis": stats_d_snap["excess_kurtosis"],
+            "Dihedral_tail_risk": stats_d_snap["tail_risk"],
+            "Total_mean_kJ": stats_p_snap["mean"],
+            "Total_std_kJ": stats_p_snap["std"],
+            "Total_min_kJ": stats_p_snap["min"],
+            "Total_max_kJ": stats_p_snap["max"],
+            "Total_skewness": stats_p_snap["skewness"],
+            "Total_excess_kurtosis": stats_p_snap["excess_kurtosis"],
+            "Total_tail_risk": stats_p_snap["tail_risk"],
+        })
+
+    return sample
+
+
+def _combine_samplers(*samplers):
+    def sample() -> None:
+        for fn in samplers:
+            if fn is not None:
+                fn()
+    return sample
 
 
 def _check_state_finite(sim, label: str, outdir: Path) -> None:
@@ -310,7 +437,23 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
         vmin_d -= pad_d; vmax_d += pad_d
     if vmax_p - vmin_p < 1e-6:
         vmin_p -= pad_p; vmax_p += pad_p
-    return vmin_d, vmax_d, vmin_p, vmax_p, dihedral_samples, total_samples, temperature_samples
+    vavg_d = float(np.mean(dihedral_samples)) if dihedral_samples else 0.0
+    vavg_p = float(np.mean(total_samples)) if total_samples else 0.0
+    vstd_d = float(np.std(dihedral_samples)) if dihedral_samples else 0.0
+    vstd_p = float(np.std(total_samples)) if total_samples else 0.0
+    return (
+        vmin_d,
+        vmax_d,
+        vmin_p,
+        vmax_p,
+        vavg_d,
+        vavg_p,
+        vstd_d,
+        vstd_p,
+        dihedral_samples,
+        total_samples,
+        temperature_samples,
+    )
 
 def _resolve_kept_feature_indices(payload: dict[str, object]) -> Optional[list[int]]:
     kept = payload.get("kept_feature_indices")
@@ -397,7 +540,7 @@ def _run_equil_cycle(
     equil_dir = outdir / "equil"
     ensure_dir(equil_dir)
 
-    VminD, VmaxD, VminP, VmaxP, dihedral_samples, total_samples, temperature_samples = _estimate_bounds(
+    VminD, VmaxD, VminP, VmaxP, VavgD, VavgP, VstdD, VstdP, dihedral_samples, total_samples, temperature_samples = _estimate_bounds(
         sim, steps=min(10000, cfg.ntebpercyc // 10), interval=max(10, cfg.ebRestartFreq)
     )
     etot_mean = float(np.mean(total_samples)) if total_samples else 0.0
@@ -406,6 +549,10 @@ def _run_equil_cycle(
         "VmaxD": VmaxD,
         "VminP": VminP,
         "VmaxP": VmaxP,
+        "VavgD": VavgD,
+        "VavgP": VavgP,
+        "VstdD": VstdD,
+        "VstdP": VstdP,
         "Etot_mean": etot_mean,
     }
     dihedral_report = gaussianity_report(np.asarray(dihedral_samples, dtype=float))
@@ -595,6 +742,7 @@ def _run_equil_cycle(
     ))
 
     reweight_enabled = bool(getattr(cfg, "reweight_diag_enabled", True))
+    gamd_diag_enabled = bool(getattr(cfg, "gamd_diag_enabled", True))
     deltaV_samples: list[float] = []
     reweight_temperature_samples: list[float] = []
     sample_fn = None
@@ -606,6 +754,44 @@ def _run_equil_cycle(
             deltaV_samples,
             reweight_temperature_samples,
         )
+    if gamd_diag_enabled:
+        diag_path = equil_dir / f"gamd-diagnostics-cycle{cyc:02d}.csv"
+        diag_logger = CSVLogger(diag_path, [
+            "step",
+            "E_potential_kJ",
+            "E_bond_kJ",
+            "E_angle_kJ",
+            "E_dihedral_kJ",
+            "E_nonbonded_kJ",
+            "DihedralRef_kJ",
+            "TotalRef_kJ",
+            "Dihedral_k",
+            "Total_k",
+            "DihedralBoost_kJ",
+            "TotalBoost_kJ",
+            "BoostedDihedral_kJ",
+            "BoostedTotal_kJ",
+            "VminD_kJ",
+            "VmaxD_kJ",
+            "VminP_kJ",
+            "VmaxP_kJ",
+            "Dihedral_mean_kJ",
+            "Dihedral_std_kJ",
+            "Dihedral_min_kJ",
+            "Dihedral_max_kJ",
+            "Dihedral_skewness",
+            "Dihedral_excess_kurtosis",
+            "Dihedral_tail_risk",
+            "Total_mean_kJ",
+            "Total_std_kJ",
+            "Total_min_kJ",
+            "Total_max_kJ",
+            "Total_skewness",
+            "Total_excess_kurtosis",
+            "Total_tail_risk",
+        ], compress=cfg.compress_logs)
+        diag_sample_fn = _make_gamd_diagnostic_sampler(sim, integ, diag_logger)
+        sample_fn = _combine_samplers(sample_fn, diag_sample_fn)
 
     _step_with_checks(
         sim,
@@ -682,6 +868,7 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
     ))
 
     reweight_enabled = bool(getattr(cfg, "reweight_diag_enabled", True))
+    gamd_diag_enabled = bool(getattr(cfg, "gamd_diag_enabled", True))
     deltaV_samples: list[float] = []
     reweight_temperature_samples: list[float] = []
     sample_fn = None
@@ -693,6 +880,44 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
             deltaV_samples,
             reweight_temperature_samples,
         )
+    if gamd_diag_enabled:
+        diag_path = prod_dir / f"gamd-diagnostics-cycle{cyc:02d}.csv"
+        diag_logger = CSVLogger(diag_path, [
+            "step",
+            "E_potential_kJ",
+            "E_bond_kJ",
+            "E_angle_kJ",
+            "E_dihedral_kJ",
+            "E_nonbonded_kJ",
+            "DihedralRef_kJ",
+            "TotalRef_kJ",
+            "Dihedral_k",
+            "Total_k",
+            "DihedralBoost_kJ",
+            "TotalBoost_kJ",
+            "BoostedDihedral_kJ",
+            "BoostedTotal_kJ",
+            "VminD_kJ",
+            "VmaxD_kJ",
+            "VminP_kJ",
+            "VmaxP_kJ",
+            "Dihedral_mean_kJ",
+            "Dihedral_std_kJ",
+            "Dihedral_min_kJ",
+            "Dihedral_max_kJ",
+            "Dihedral_skewness",
+            "Dihedral_excess_kurtosis",
+            "Dihedral_tail_risk",
+            "Total_mean_kJ",
+            "Total_std_kJ",
+            "Total_min_kJ",
+            "Total_max_kJ",
+            "Total_skewness",
+            "Total_excess_kurtosis",
+            "Total_tail_risk",
+        ], compress=cfg.compress_logs)
+        diag_sample_fn = _make_gamd_diagnostic_sampler(sim, integ, diag_logger)
+        sample_fn = _combine_samplers(sample_fn, diag_sample_fn)
 
     _step_with_checks(
         sim,
@@ -798,8 +1023,6 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
             sim = sim_nvt
         run_density_equil(cfg, sim, outdir)
         _check_state_finite(sim, "prep", outdir)
-
-    _assign_force_groups(sim)
 
     write_run_manifest(outdir, {
         "stage": "equil+prod",

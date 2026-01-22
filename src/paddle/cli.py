@@ -308,7 +308,10 @@ def build_parser():
     p.add_argument("--out", required=True)
     p.add_argument("--window", type=int, default=128)
     p.add_argument("--stride", type=int, default=4)
-    p.add_argument("--features", default="Etot_kJ,Edih_kJ,T_K")
+    p.add_argument(
+        "--features",
+        default="E_potential_kJ,E_bond_kJ,E_angle_kJ,E_dihedral_kJ,E_nonbonded_kJ,T_K",
+    )
     p.add_argument("--target", default="Etot_kJ")
     p.add_argument("--horizon", type=int, default=1)
     p.add_argument("--norm", choices=["zscore", "minmax", "none"], default="zscore")
@@ -339,7 +342,10 @@ def build_parser():
     p.add_argument("--out", default=None)
     p.add_argument("--window", type=int, default=128)
     p.add_argument("--stride", type=int, default=4)
-    p.add_argument("--features", default="Etot_kJ,Edih_kJ,T_K")
+    p.add_argument(
+        "--features",
+        default="E_potential_kJ,E_bond_kJ,E_angle_kJ,E_dihedral_kJ,E_nonbonded_kJ,T_K",
+    )
     p.add_argument("--target", default="Etot_kJ")
     p.add_argument("--horizon", type=int, default=1)
     p.add_argument("--norm", choices=["zscore", "minmax", "none"], default="zscore")

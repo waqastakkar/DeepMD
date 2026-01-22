@@ -18,6 +18,7 @@ _KURTOSIS_FREEZE = 2.0
 _SKEW_FREEZE = 0.6
 _TAIL_RISK_GOOD = 0.01
 _TAIL_RISK_FREEZE = 0.05
+_EPS = 1e-12
 
 
 def _get_value(source: object, key: str) -> Optional[float]:
@@ -230,6 +231,8 @@ def propose_boost_params(
     if k0_min > k0_max:
         raise ValueError(f"k0_min must be <= k0_max, got {(k0_min, k0_max)}")
     base_k0 = float(getattr(cfg, "k0_initial", 0.5))
+    k_min = getattr(cfg, "k_min", None)
+    k_max = getattr(cfg, "k_max", None)
 
     kurtosis_high = float(getattr(cfg, "gaussian_excess_kurtosis_high", _KURTOSIS_HIGH))
     kurtosis_good = float(getattr(cfg, "gaussian_excess_kurtosis_good", _KURTOSIS_GOOD))
@@ -245,6 +248,10 @@ def propose_boost_params(
     vmax_d = _get_value(cycle_stats, "VmaxD")
     vmin_p = _get_value(cycle_stats, "VminP")
     vmax_p = _get_value(cycle_stats, "VmaxP")
+    vavg_d = _get_value(cycle_stats, "VavgD")
+    vstd_d = _get_value(cycle_stats, "VstdD")
+    vavg_p = _get_value(cycle_stats, "VavgP")
+    vstd_p = _get_value(cycle_stats, "VstdP")
 
     if vmin_d is None or vmax_d is None:
         if last_restart is None:
@@ -298,6 +305,31 @@ def propose_boost_params(
 
     k0D = _clamp(k0D, k0_min, k0_max)
     k0P = _clamp(k0P, k0_min, k0_max)
+
+    def _apply_sigma0_limit(
+        k0: float,
+        vmin: float,
+        vmax: float,
+        vavg: Optional[float],
+        vstd: Optional[float],
+        sigma0: Optional[float],
+    ) -> float:
+        if sigma0 is None or sigma0 <= 0.0 or vavg is None or vstd is None or vstd <= 0.0:
+            return k0
+        span = max(vmax - vmin, _EPS)
+        denom = max((vmax - vavg) * vstd, _EPS)
+        k0_sigma = float(sigma0) * span / denom
+        k0 = min(k0, k0_sigma)
+        k0 = _clamp(k0, k0_min, k0_max)
+        k_val = k0 / span
+        if k_min is not None:
+            k_val = max(float(k_min), k_val)
+        if k_max is not None:
+            k_val = min(float(k_max), k_val)
+        return _clamp(k_val * span, k0_min, k0_max)
+
+    k0D = _apply_sigma0_limit(k0D, vmin_d, vmax_d, vavg_d, vstd_d, getattr(cfg, "sigma0D", None))
+    k0P = _apply_sigma0_limit(k0P, vmin_p, vmax_p, vavg_p, vstd_p, getattr(cfg, "sigma0P", None))
 
     return BoostParams(
         VminD=vmin_d,

@@ -22,5 +22,5 @@ class BoostParams:
             self.VminD, self.VmaxD = self.VmaxD, self.VminD
         if self.VmaxP < self.VminP:
             self.VminP, self.VmaxP = self.VmaxP, self.VminP
-        self.k0D = float(max(1e-6, min(1.0, self.k0D)))
-        self.k0P = float(max(1e-6, min(1.0, self.k0P)))
+        self.k0D = float(max(0.0, min(1.0, self.k0D)))
+        self.k0P = float(max(0.0, min(1.0, self.k0P)))
