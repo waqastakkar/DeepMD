@@ -10,9 +10,9 @@ from typing import Optional, Sequence, Tuple
 import math
 import numpy as np
 from openmm import XmlSerializer, unit
-from openmm.app import DCDReporter, StateDataReporter
+from openmm.app import DCDReporter, StateDataReporter, PDBFile
 import openmm as mm
-from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
+from paddle.config import SimulationConfig, is_explicit_simtype, ns_to_steps, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation, log_simulation_start
 from paddle.core.integrators import make_dual_equil, make_dual_prod, make_conventional
 from paddle.io.report import CSVLogger, ensure_dir, write_run_manifest, append_metrics, write_json
@@ -328,40 +328,119 @@ def _combine_samplers(*samplers):
     return sample
 
 
-def _check_state_finite(sim, label: str, outdir: Path) -> None:
-    ensure_dir(outdir)
-    state = sim.context.getState(getPositions=True, getEnergy=True)
-    positions = state.getPositions(asNumpy=True)
-    positions_ok = False
-    if positions is not None:
+def _positions_finite(positions) -> bool:
+    if positions is None:
+        return False
+    try:
         positions_nm = positions.value_in_unit(unit.nanometer)
-        positions_ok = bool(np.isfinite(positions_nm).all())
-    potential = state.getPotentialEnergy()
-    potential_kj = None
-    potential_ok = False
-    if potential is not None:
-        potential_kj = float(potential.value_in_unit(unit.kilojoule_per_mole))
-        potential_ok = bool(np.isfinite(potential_kj))
-    if positions_ok and potential_ok:
-        return
-    failed_state = outdir / f"failed_state_{label}.xml"
-    failed_state.write_text(XmlSerializer.serialize(state), encoding="utf-8")
+    except Exception:
+        return False
+    return bool(np.isfinite(positions_nm).all())
+
+
+def _velocities_finite(velocities) -> bool:
+    if velocities is None:
+        return False
+    try:
+        velocities_nm_ps = velocities.value_in_unit(unit.nanometer / unit.picosecond)
+    except Exception:
+        return False
+    return bool(np.isfinite(velocities_nm_ps).all())
+
+
+def _record_last_valid_state(sim, state) -> None:
+    sim._last_valid_positions = state.getPositions()
+    try:
+        sim._last_valid_box_vectors = state.getPeriodicBoxVectors()
+    except Exception:
+        sim._last_valid_box_vectors = None
+    try:
+        sim._last_valid_step = int(getattr(sim, "currentStep", 0))
+    except Exception:
+        sim._last_valid_step = 0
+
+
+def _state_box_vectors_nm(state) -> Optional[list[list[float]]]:
+    try:
+        a, b, c = state.getPeriodicBoxVectors()
+    except Exception:
+        return None
+    vectors = []
+    for vec in (a, b, c):
+        try:
+            vec_nm = vec.value_in_unit(unit.nanometer)
+        except Exception:
+            return None
+        vectors.append([float(x) for x in vec_nm])
+    return vectors
+
+
+def _dump_instability(
+    sim,
+    cfg: SimulationConfig,
+    outdir: Path,
+    label: str,
+    state,
+) -> None:
+    ensure_dir(outdir)
+    step = int(getattr(sim, "currentStep", 0))
+    crash_pdb = outdir / f"crash_last_valid_{label}.pdb"
+    last_positions = getattr(sim, "_last_valid_positions", None)
+    if last_positions is None:
+        last_positions = state.getPositions()
+    if last_positions is not None:
+        with crash_pdb.open("w", encoding="utf-8") as handle:
+            PDBFile.writeFile(sim.topology, last_positions, handle)
+    crash_cfg = outdir / f"crash_config_{label}.json"
+    write_json(cfg.as_dict(), crash_cfg)
     diagnostics = {
-        "step": int(getattr(state, "getStepCount", lambda: 0)()),
-        "potential_energy_kj_mol": potential_kj,
+        "step": step,
+        "potential_energy_kj_mol": None,
+        "kinetic_energy_kj_mol": None,
+        "total_energy_kj_mol": None,
         "temperature_k": _compute_temperature_k(state, sim),
+        "box_vectors_nm": _state_box_vectors_nm(state),
+        "last_valid_step": int(getattr(sim, "_last_valid_step", 0)),
     }
-    write_json(diagnostics, outdir / f"failed_state_{label}.json")
+    try:
+        potential = state.getPotentialEnergy()
+        diagnostics["potential_energy_kj_mol"] = float(potential.value_in_unit(unit.kilojoule_per_mole))
+    except Exception:
+        diagnostics["potential_energy_kj_mol"] = None
+    try:
+        kinetic = state.getKineticEnergy()
+        diagnostics["kinetic_energy_kj_mol"] = float(kinetic.value_in_unit(unit.kilojoule_per_mole))
+    except Exception:
+        diagnostics["kinetic_energy_kj_mol"] = None
+    if diagnostics["potential_energy_kj_mol"] is not None and diagnostics["kinetic_energy_kj_mol"] is not None:
+        diagnostics["total_energy_kj_mol"] = (
+            diagnostics["potential_energy_kj_mol"] + diagnostics["kinetic_energy_kj_mol"]
+        )
+    diag_path = outdir / f"crash_diagnostics_{label}.json"
+    write_json(diagnostics, diag_path)
     raise RuntimeError(
-        f"Non-finite state detected ({label}). "
-        f"Saved diagnostics to {failed_state}."
+        "Non-finite positions/velocities detected. "
+        f"Wrote {crash_pdb}, {diag_path}, and {crash_cfg}."
     )
+
+
+def _check_state_finite(sim, cfg: SimulationConfig, label: str, outdir: Path) -> None:
+    state = sim.context.getState(getEnergy=True, getPositions=True, getVelocities=True)
+    positions = state.getPositions(asNumpy=True)
+    velocities = state.getVelocities(asNumpy=True)
+    if _positions_finite(positions) and _velocities_finite(velocities):
+        _record_last_valid_state(sim, state)
+        return
+    _dump_instability(sim, cfg, outdir, label, state)
 
 
 def _resolve_dt_ps(cfg: SimulationConfig, default: float = 0.002) -> float:
     dt = getattr(cfg, "dt", None)
     if dt is None:
-        return default
+        dt = default
+    if getattr(cfg, "safe_mode", False):
+        dt_fs = float(getattr(cfg, "debug_safe_dt_fs", 1.0))
+        dt = dt_fs / 1000.0
     return float(dt)
 
 def _adaptive_stop_status(
@@ -426,23 +505,99 @@ def _adaptive_stop_status(
     }
 
 
+def _gamd_ready_for_boost(cfg: SimulationConfig, cyc: int, metrics: dict[str, object]) -> bool:
+    min_cycles = int(getattr(cfg, "gamd_stable_min_cycles", 1))
+    conf_min = float(getattr(cfg, "gamd_stable_conf_min", 0.0))
+    cycles_done = cyc - int(cfg.ncycebstart) + 1
+    conf = float(metrics.get("gaussian_confidence", 0.0))
+    change_point = bool(metrics.get("change_point", False))
+    return cycles_done >= min_cycles and conf >= conf_min and not change_point
+
+
+class SafeDCDReporter:
+    def __init__(self, reporter: DCDReporter, cfg: SimulationConfig, outdir: Path, label: str):
+        self._reporter = reporter
+        self._cfg = cfg
+        self._outdir = outdir
+        self._label = label
+
+    def describeNextReport(self, simulation):
+        return self._reporter.describeNextReport(simulation)
+
+    def report(self, simulation, state) -> None:
+        positions = state.getPositions(asNumpy=True)
+        if not _positions_finite(positions):
+            _dump_instability(simulation, self._cfg, self._outdir, f"{self._label}_dcd", state)
+        self._reporter.report(simulation, state)
+
+
+def _update_gamd_boost_scale(sim, integ, cfg: SimulationConfig, gamd_ready: bool) -> float:
+    try:
+        integ.getGlobalVariableByName("boost_scale")
+    except Exception:
+        return 1.0
+    if not gamd_ready or getattr(cfg, "debug_disable_gamd", False):
+        integ.setGlobalVariableByName("boost_scale", 0.0)
+        return 0.0
+    ramp_ns = float(getattr(cfg, "gamd_ramp_ns", 0.0))
+    ramp_steps = ns_to_steps(ramp_ns, _resolve_dt_ps(cfg)) if ramp_ns > 0 else 0
+    if not hasattr(sim, "_gamd_ramp_start_step"):
+        sim._gamd_ramp_start_step = int(getattr(sim, "currentStep", 0))
+    if ramp_steps <= 0:
+        integ.setGlobalVariableByName("boost_scale", 1.0)
+        return 1.0
+    steps_since = max(0, int(getattr(sim, "currentStep", 0)) - int(sim._gamd_ramp_start_step))
+    scale = min(1.0, steps_since / float(ramp_steps))
+    integ.setGlobalVariableByName("boost_scale", scale)
+    return scale
+
+
 def _step_with_checks(
     sim,
     total_steps: int,
     block_size: int,
     label_prefix: str,
     outdir: Path,
+    cfg: SimulationConfig,
+    integ=None,
+    gamd_ready: bool = True,
     sample_fn=None,
 ) -> None:
     remaining = int(total_steps)
     block = max(1, int(block_size))
+    if getattr(cfg, "safe_mode", False):
+        block = min(block, 200)
     block_index = 0
+    init_state = sim.context.getState(getEnergy=True, getPositions=True, getVelocities=True)
+    if _positions_finite(init_state.getPositions(asNumpy=True)) and _velocities_finite(init_state.getVelocities(asNumpy=True)):
+        _record_last_valid_state(sim, init_state)
+    else:
+        _dump_instability(sim, cfg, outdir, f"{label_prefix}_initial", init_state)
     while remaining > 0:
+        if integ is not None:
+            _update_gamd_boost_scale(sim, integ, cfg, gamd_ready)
         step_now = min(block, remaining)
         sim.step(step_now)
         if sample_fn is not None:
             sample_fn()
-        _check_state_finite(sim, f"{label_prefix}_block{block_index:04d}", outdir)
+        state = sim.context.getState(getEnergy=True, getPositions=True, getVelocities=True)
+        positions = state.getPositions(asNumpy=True)
+        velocities = state.getVelocities(asNumpy=True)
+        if _positions_finite(positions) and _velocities_finite(velocities):
+            _record_last_valid_state(sim, state)
+        else:
+            _dump_instability(sim, cfg, outdir, f"{label_prefix}_block{block_index:04d}", state)
+        if integ is not None:
+            try:
+                clamp_scale = float(integ.getGlobalVariableByName("ClampScale"))
+                if clamp_scale < 1.0:
+                    delta_v = float(integ.getGlobalVariableByName("DeltaV"))
+                    print(
+                        f"WARNING: GaMD boost clamped at step {int(getattr(sim, 'currentStep', 0))} "
+                        f"(scale={clamp_scale:.3f}, DeltaV={delta_v:.1f} kJ/mol)."
+                    )
+            except Exception:
+                pass
         remaining -= step_now
         block_index += 1
 
@@ -627,7 +782,7 @@ def _run_equil_cycle(
     explore_hist: list[float],
     latent_pca: Optional[Tuple[np.ndarray, np.ndarray, dict[str, object]]] = None,
     model_summary: Optional[dict[str, object]] = None,
-) -> tuple[RestartRecord, dict[str, object]]:
+) -> tuple[RestartRecord, dict[str, object], bool]:
     equil_dir = outdir / "equil"
     ensure_dir(equil_dir)
 
@@ -725,6 +880,10 @@ def _run_equil_cycle(
     metrics["change_point_z"] = float(cp["z_score"])
     metrics["gaussian_confidence"] = float(gaussian_confidence(cfg, metrics))
     metrics["controller_frozen"] = bool(freeze_bias_update(cfg, metrics))
+    gamd_ready = _gamd_ready_for_boost(cfg, cyc, metrics)
+    if getattr(cfg, "debug_disable_gamd", False):
+        gamd_ready = False
+    metrics["gamd_ready"] = bool(gamd_ready)
     controller = {
         "gaussian_confidence": float(metrics["gaussian_confidence"]),
         "freeze_bias_update": bool(metrics["controller_frozen"]),
@@ -737,6 +896,7 @@ def _run_equil_cycle(
         "explore_mean_abs_diff": float(metrics["explore_mean_abs_diff"]),
         "explore_std": float(metrics["explore_std"]),
         "explore_score": float(metrics["explore_score"]),
+        "gamd_ready": bool(gamd_ready),
     }
     if "conf_ewma" in metrics:
         controller["conf_ewma"] = float(metrics["conf_ewma"])
@@ -749,6 +909,12 @@ def _run_equil_cycle(
         metrics=metrics,
         model_summary=model_summary,
     )
+    if not gamd_ready:
+        params.k0D = 0.0
+        params.k0P = 0.0
+    elif bool(getattr(cfg, "safe_mode", False)):
+        params.k0D *= 0.5
+        params.k0P *= 0.5
     controller["multi_objective_alpha"] = float(multi_objective_alpha(cfg, metrics, model_summary))
     if bool(getattr(cfg, "safe_mode", False)) and cyc == int(cfg.ncycebstart):
         params.k0D = 0.0
@@ -814,6 +980,10 @@ def _run_equil_cycle(
         bias_plan["model_summary"] = model_summary
 
     integ = make_dual_equil(dt_ps=_resolve_dt_ps(cfg), temperature_K=cfg.temperature, params=params)
+    try:
+        integ.setGlobalVariableByName("deltaV_abs_max", float(cfg.deltaV_abs_max))
+    except Exception:
+        pass
 
     # ---- NEW: bind the new integrator
     _attach_integrator(sim, integ)
@@ -821,7 +991,7 @@ def _run_equil_cycle(
     dcd = equil_dir / f"equil-cycle{cyc:02d}.dcd"
     log = equil_dir / f"equil-cycle{cyc:02d}.log"
     sim.reporters = []
-    sim.reporters.append(DCDReporter(str(dcd), cfg.ebRestartFreq))
+    sim.reporters.append(SafeDCDReporter(DCDReporter(str(dcd), cfg.ebRestartFreq), cfg, outdir, f"equil_cycle{cyc:02d}"))
     sim.reporters.append(StateDataReporter(
         file=str(log), reportInterval=cfg.ebRestartFreq,
         step=True, time=True, potentialEnergy=True, kineticEnergy=True, totalEnergy=True,
@@ -829,7 +999,7 @@ def _run_equil_cycle(
     ))
 
     reweight_enabled = bool(getattr(cfg, "reweight_diag_enabled", True))
-    gamd_diag_enabled = bool(getattr(cfg, "gamd_diag_enabled", True))
+    gamd_diag_enabled = bool(getattr(cfg, "gamd_diag_enabled", True)) and not getattr(cfg, "debug_disable_gamd", False)
     deltaV_samples: list[float] = []
     reweight_temperature_samples: list[float] = []
     sample_fn = None
@@ -916,6 +1086,9 @@ def _run_equil_cycle(
         cfg.ebRestartFreq,
         f"equil_cycle{cyc:02d}",
         outdir,
+        cfg,
+        integ=integ,
+        gamd_ready=gamd_ready,
         sample_fn=sample_fn,
     )
 
@@ -970,17 +1143,36 @@ def _run_equil_cycle(
         "VminD": VminD_f,"VmaxD": VmaxD_f,"VminP": VminP_f,"VmaxP": VmaxP_f,
         "k0D": k0D_f,"k0P": k0P_f
     }, outdir)
-    return rec, adaptive_stop
+    return rec, adaptive_stop, gamd_ready
 
-def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: RestartRecord) -> RestartRecord:
+def _run_prod_cycle(
+    cfg: SimulationConfig,
+    cyc: int,
+    sim,
+    outdir: Path,
+    rec: RestartRecord,
+    gamd_ready: bool,
+) -> RestartRecord:
     prod_dir = outdir / "prod"
     ensure_dir(prod_dir)
 
     params = record_to_boost_params(rec)
     params.refED_factor = cfg.refED_factor
     params.refEP_factor = cfg.refEP_factor
+    if getattr(cfg, "debug_disable_gamd", False):
+        gamd_ready = False
+    if not gamd_ready:
+        params.k0D = 0.0
+        params.k0P = 0.0
+    elif bool(getattr(cfg, "safe_mode", False)):
+        params.k0D *= 0.5
+        params.k0P *= 0.5
 
     integ = make_dual_prod(dt_ps=_resolve_dt_ps(cfg), temperature_K=cfg.temperature, params=params)
+    try:
+        integ.setGlobalVariableByName("deltaV_abs_max", float(cfg.deltaV_abs_max))
+    except Exception:
+        pass
 
     # ---- NEW: bind the new integrator
     _attach_integrator(sim, integ)
@@ -988,7 +1180,7 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
     dcd = prod_dir / f"prod-cycle{cyc:02d}.dcd"
     log = prod_dir / f"prod-cycle{cyc:02d}.log"
     sim.reporters = []
-    sim.reporters.append(DCDReporter(str(dcd), cfg.prodRestartFreq))
+    sim.reporters.append(SafeDCDReporter(DCDReporter(str(dcd), cfg.prodRestartFreq), cfg, outdir, f"prod_cycle{cyc:02d}"))
     sim.reporters.append(StateDataReporter(
         file=str(log), reportInterval=cfg.prodRestartFreq,
         step=True, time=True, potentialEnergy=True, kineticEnergy=True, totalEnergy=True,
@@ -996,7 +1188,7 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
     ))
 
     reweight_enabled = bool(getattr(cfg, "reweight_diag_enabled", True))
-    gamd_diag_enabled = bool(getattr(cfg, "gamd_diag_enabled", True))
+    gamd_diag_enabled = bool(getattr(cfg, "gamd_diag_enabled", True)) and not getattr(cfg, "debug_disable_gamd", False)
     deltaV_samples: list[float] = []
     reweight_temperature_samples: list[float] = []
     sample_fn = None
@@ -1083,6 +1275,9 @@ def _run_prod_cycle(cfg: SimulationConfig, cyc: int, sim, outdir: Path, rec: Res
         cfg.prodRestartFreq,
         f"prod_cycle{cyc:02d}",
         outdir,
+        cfg,
+        integ=integ,
+        gamd_ready=gamd_ready,
         sample_fn=sample_fn,
     )
 
@@ -1128,11 +1323,17 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     set_global_seed(cfg.seed)
 
     dt_ps = _resolve_dt_ps(cfg)
+    if getattr(cfg, "safe_mode", False):
+        if cfg.dt != dt_ps:
+            cfg.dt = dt_ps
+            cfg.reconcile_time_settings(
+                input_keys={"cmd_ns", "equil_ns_per_cycle", "prod_ns_per_cycle", "heat_ns", "density_ns"}
+            )
     logged = False
     cmd_checkpoint = outdir / "cmd.rst"
     loaded = False
     if cmd_checkpoint.exists():
-        opts_npt = _options_from_cfg(cfg, add_barostat=True)
+        opts_npt = _options_from_cfg(cfg, add_barostat=not getattr(cfg, "debug_disable_barostat", False))
         integ0 = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
         sim = create_simulation(cfg.parmFile, cfg.crdFile, integ0, opts_npt)
         if not logged:
@@ -1173,14 +1374,14 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
         if not cfg.do_heating:
             sim_nvt.context.setVelocitiesToTemperature(cfg.temperature * unit.kelvin)
         if is_explicit_simtype(cfg.simType):
-            opts_npt = _options_from_cfg(cfg, add_barostat=True)
+            opts_npt = _options_from_cfg(cfg, add_barostat=not getattr(cfg, "debug_disable_barostat", False))
             integ0 = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
             sim = create_simulation(cfg.parmFile, cfg.crdFile, integ0, opts_npt)
             transfer_state(sim_nvt, sim)
         else:
             sim = sim_nvt
         run_density_equil(cfg, sim, outdir)
-        _check_state_finite(sim, "prep", outdir)
+        _check_state_finite(sim, cfg, "prep", outdir)
 
     write_run_manifest(outdir, {
         "stage": "equil+prod",
@@ -1203,8 +1404,9 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
     k0D_hist: list[float] = []
     k0P_hist: list[float] = []
     explore_hist: list[float] = []
+    last_gamd_ready = False
     for cyc in range(int(cfg.ncycebstart), int(cfg.ncycebend)):
-        rec, adaptive_stop = _run_equil_cycle(
+        rec, adaptive_stop, gamd_ready = _run_equil_cycle(
             cfg,
             cyc,
             sim,
@@ -1220,6 +1422,7 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
             latent_pca=latent_pca,
             model_summary=model_summary,
         )
+        last_gamd_ready = gamd_ready
         if adaptive_stop.get("enabled") and adaptive_stop.get("triggered"):
             stop_info = {
                 "stop_cycle": int(cyc),
@@ -1247,7 +1450,7 @@ def run_equil_and_prod(cfg: SimulationConfig) -> None:
         validate_against_state(rec)
 
     for cyc in range(int(cfg.ncycprodstart), int(cfg.ncycprodend)):
-        rec = _run_prod_cycle(cfg, cyc, sim, outdir, rec)
+        rec = _run_prod_cycle(cfg, cyc, sim, outdir, rec, last_gamd_ready)
 
 if __name__ == "__main__":
     import argparse
