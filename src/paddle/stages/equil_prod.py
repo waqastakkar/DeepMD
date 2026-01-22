@@ -70,8 +70,16 @@ def _attach_integrator(sim, integrator) -> None:
 
 def _assign_force_groups(sim) -> None:
     for force in sim.system.getForces():
-        if force.__class__.__name__ == "PeriodicTorsionForce":
+        if isinstance(force, mm.HarmonicBondForce):
+            force.setForceGroup(1)
+        elif isinstance(force, mm.HarmonicAngleForce):
             force.setForceGroup(2)
+        elif isinstance(force, (mm.PeriodicTorsionForce, mm.CustomTorsionForce, mm.RBTorsionForce, mm.CMAPTorsionForce)):
+            force.setForceGroup(3)
+        elif isinstance(force, mm.NonbondedForce):
+            force.setForceGroup(4)
+        else:
+            force.setForceGroup(0)
 
 def _compute_temperature_k(state, sim) -> Optional[float]:
     try:
@@ -284,7 +292,7 @@ def _estimate_bounds(sim, steps: int = 10000, interval: int = 100):
     temperature_samples: list[float] = []
     for _ in range(n):
         sim.step(interval)
-        Ed = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        Ed = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         state_total = sim.context.getState(getEnergy=True, getVelocities=True)
         Ep = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         dihedral_samples.append(Ed)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from openmm import XmlSerializer, unit
+import openmm as mm
 
 from paddle.config import SimulationConfig, is_explicit_simtype, set_global_seed
 from paddle.core.engine import EngineOptions, create_simulation, log_simulation_start, minimize_and_initialize
@@ -30,8 +31,16 @@ def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
 
 def _assign_force_groups(sim) -> None:
     for force in sim.system.getForces():
-        if force.__class__.__name__ == "PeriodicTorsionForce":
+        if isinstance(force, mm.HarmonicBondForce):
+            force.setForceGroup(1)
+        elif isinstance(force, mm.HarmonicAngleForce):
             force.setForceGroup(2)
+        elif isinstance(force, (mm.PeriodicTorsionForce, mm.CustomTorsionForce, mm.RBTorsionForce, mm.CMAPTorsionForce)):
+            force.setForceGroup(3)
+        elif isinstance(force, mm.NonbondedForce):
+            force.setForceGroup(4)
+        else:
+            force.setForceGroup(0)
 
 def _load_cmd_checkpoint_if_any(sim, outdir: Path) -> bool:
     rst = outdir / "cmd.rst"
@@ -99,11 +108,15 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
         interval = max(1, int(cfg.ebprepRestartFreq))
         n_reports = steps // interval
 
+        edih_zero_count = 0
         for i in range(n_reports):
             sim.step(interval)
             Etot = sim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-            Edih = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-            state = sim.context.getState(getEnergy=True)
+            Edih = sim.context.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            if i < 10 and Edih == 0.0:
+                edih_zero_count += 1
+                if i == 9 and edih_zero_count == 10:
+                    print("WARNING: Edih_kJ is zero; check torsion forces / force groups.")
             state = sim.context.getState(getEnergy=True)
             K_kJ = state.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole)
             N = sim.system.getNumParticles()
