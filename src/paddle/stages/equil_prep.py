@@ -21,8 +21,9 @@ def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
         cuda_device_index=cfg.cuda_device_index,
         deterministic_forces=cfg.deterministic_forces,
         add_barostat=is_explicit_simtype(cfg.simType),
-        barostat_pressure_atm=1.0,
-        barostat_interval=25,
+        barostat_pressure_atm=cfg.pressure_atm,
+        barostat_interval=cfg.barostat_interval,
+        barostat_temperature_kelvin=cfg.temperature,
         ewald_error_tolerance=cfg.ewaldErrorTolerance,
         use_dispersion_correction=cfg.useDispersionCorrection,
         rigid_water=cfg.rigidWater,
@@ -110,7 +111,7 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
         edih_zero_count = 0
         for i in range(n_reports):
             sim.step(interval)
-            state_total = sim.context.getState(getEnergy=True, getVelocities=True, groups={1, 2, 3, 4})
+            state_total = sim.context.getState(getEnergy=True, getVelocities=True)
             Etot = state_total.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
             E_bond = sim.context.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
             E_angle = sim.context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
