@@ -13,7 +13,7 @@ import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import yaml  # type: ignore
@@ -146,6 +146,14 @@ class SimulationConfig:
     cmd_ns: float = 5.0
     equil_ns_per_cycle: float = 5.0
     prod_ns_per_cycle: float = 5.0
+    feature_columns: List[str] = dc.field(default_factory=lambda: [
+        "E_potential_kJ",
+        "E_bond_kJ",
+        "E_angle_kJ",
+        "E_dihedral_kJ",
+        "E_nonbonded_kJ",
+        "T_K",
+    ])
 
     ntcmd: int = 2_500_000
     cmdRestartFreq: int = 100
@@ -321,6 +329,14 @@ class SimulationConfig:
                 raise ValueError(f"{name} must be a bool")
         if self.require_gpu and self.platform != "CUDA":
             raise ValueError("require_gpu is true but platform is not CUDA")
+
+        if not isinstance(self.feature_columns, list) or not self.feature_columns:
+            raise ValueError("feature_columns must be a non-empty list of strings")
+        if not all(isinstance(col, str) and col.strip() for col in self.feature_columns):
+            raise ValueError("feature_columns must contain only non-empty strings")
+        dupes = {col for col in self.feature_columns if self.feature_columns.count(col) > 1}
+        if dupes:
+            raise ValueError(f"feature_columns contains duplicates: {sorted(dupes)}")
 
         Path(self.outdir).mkdir(parents=True, exist_ok=True)
         if self.safe_mode or getattr(self, "validate_config", False):

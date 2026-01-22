@@ -62,7 +62,7 @@ def cmd_data(ns):
     out_dir = Path(ns.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     df = read_prep_logs(prep_dir)
-    feat_cols = [s.strip() for s in ns.features.split(",") if s.strip()]
+    feat_cols = list(cfg.feature_columns)
     targ_cols = [s.strip() for s in ns.target.split(",") if s.strip()]
     X, y, stats = make_windows(df, feat_cols, targ_cols, ns.window, ns.stride, ns.horizon, ns.norm)
     idx = time_split(len(X), train=ns.train, val=ns.val)
@@ -111,7 +111,7 @@ def cmd_pipeline(ns):
     data_dir = out_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     df = read_prep_logs(prep_dir)
-    feat_cols = [s.strip() for s in ns.features.split(",") if s.strip()]
+    feat_cols = list(cfg.feature_columns)
     targ_cols = [s.strip() for s in ns.target.split(",") if s.strip()]
     X, y, stats = make_windows(df, feat_cols, targ_cols, ns.window, ns.stride, ns.horizon, ns.norm)
     idx = time_split(len(X), train=ns.train, val=ns.val)

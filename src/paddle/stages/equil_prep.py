@@ -11,6 +11,15 @@ from paddle.core.engine import EngineOptions, create_simulation, log_simulation_
 from paddle.core.integrators import make_conventional
 from paddle.io.report import CSVLogger, ensure_dir, write_run_manifest, append_metrics
 
+def _ordered_fields(base: list[str], feature_columns: list[str]) -> list[str]:
+    seen = set(base)
+    ordered = list(base)
+    for col in feature_columns:
+        if col not in seen:
+            ordered.append(col)
+            seen.add(col)
+    return ordered
+
 def _options_from_cfg(cfg: SimulationConfig) -> EngineOptions:
     return EngineOptions(
         sim_type=cfg.simType,
@@ -51,6 +60,7 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
     ensure_dir(prepdir)
 
     set_global_seed(cfg.seed)
+    feature_columns = list(cfg.feature_columns)
 
     dt_ps = float(cfg.dt or 0.002)
     integ = make_conventional(dt_ps=dt_ps, temperature_K=cfg.temperature, collision_rate_ps=1.0)
@@ -90,17 +100,7 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
         csv_path = prepdir / f"equilprep-cycle{cyc:02d}.csv"
         logger = CSVLogger(
             csv_path,
-            [
-                "step",
-                "Etot_kJ",
-                "Edih_kJ",
-                "E_potential_kJ",
-                "E_bond_kJ",
-                "E_angle_kJ",
-                "E_dihedral_kJ",
-                "E_nonbonded_kJ",
-                "T_K",
-            ],
+            _ordered_fields(["step", "Etot_kJ", "Edih_kJ"], feature_columns),
             compress=cfg.compress_logs,
         )
 
@@ -130,16 +130,27 @@ def run_equil_prep(cfg: SimulationConfig) -> None:
             unit.kilojoule_per_mole / unit.kelvin
             )
             T = 2.0 * K_kJ / (dof * kB_kJ_per_mol_K)
-            logger.writerow({
-                "step": (i + 1) * interval,
-                "Etot_kJ": Etot,
-                "Edih_kJ": Edih,
+            feature_values = {
                 "E_potential_kJ": Etot,
                 "E_bond_kJ": E_bond,
                 "E_angle_kJ": E_angle,
                 "E_dihedral_kJ": E_dihedral,
                 "E_nonbonded_kJ": E_nonbonded,
                 "T_K": T,
+                "Etot_kJ": Etot,
+                "Edih_kJ": Edih,
+            }
+            missing = [name for name in feature_columns if name not in feature_values]
+            if missing:
+                raise ValueError(
+                    f"Unknown feature_columns in config: {missing}. "
+                    "Update feature_columns to match available energy/temperature fields."
+                )
+            logger.writerow({
+                "step": (i + 1) * interval,
+                "Etot_kJ": Etot,
+                "Edih_kJ": Edih,
+                **{name: feature_values[name] for name in feature_columns},
             })
 
         append_metrics({"phase": "equil_prep","cycle": cyc,"samples": int(n_reports)}, prepdir)

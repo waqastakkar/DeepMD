@@ -181,6 +181,16 @@ def train_ensemble(npz: str | Path, splits: str | Path, out_dir: str | Path, cfg
 
     X, y = load_npz_bundle(npz)
     D = y.shape[1]
+    feature_names: Optional[list[str]] = None
+    stats_path = Path(npz).with_name("stats.json")
+    if stats_path.exists():
+        try:
+            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            names = stats.get("feature_cols", {}).get("names")
+            if isinstance(names, list) and all(isinstance(n, str) for n in names):
+                feature_names = list(names)
+        except Exception:
+            feature_names = None
 
     with open(splits, "r", encoding="utf-8") as f:
         sp = json.load(f)
@@ -270,6 +280,8 @@ def train_ensemble(npz: str | Path, splits: str | Path, out_dir: str | Path, cfg
             "effective_dim": effective_dim,
             "kept_feature_indices": kept_feature_indices,
         }
+        if feature_names is not None:
+            pca_payload["feature_names"] = feature_names
         (out / "latent_pca.json").write_text(json.dumps(pca_payload, indent=2), encoding="utf-8")
         latent_model_summary = {"type": "pca", "k": k_latent, "path": "latent_pca.json"}
     except Exception as exc:
